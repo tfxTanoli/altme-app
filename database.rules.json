@@ -1,0 +1,30 @@
+{
+    "rules": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "users": {
+            "$userId": {
+                ".write": "$userId === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'"
+            }
+        },
+        "photographerProfiles": {
+            ".indexOn": [
+                "isAcceptingRequests"
+            ],
+            "$photographerId": {
+                ".write": "$photographerId === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'"
+            }
+        },
+        "notifications": {
+            "$userId": {
+                ".indexOn": [
+                    "timestamp"
+                ],
+                ".read": "$userId === auth.uid",
+                "$notificationId": {
+                    ".write": "auth != null"
+                }
+            }
+        }
+    }
+}

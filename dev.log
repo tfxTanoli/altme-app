@@ -1,0 +1,36 @@
+
+> nextn@0.1.0 dev
+> next dev
+
+   ▲ Next.js 15.5.9
+   - Local:        http://localhost:3000
+   - Network:      http://10.244.123.252:3000
+   - Environments: .env
+
+ ✓ Starting...
+ ✓ Ready in 3.1s
+ ○ Compiling /login ...
+ ✓ Compiled /login in 14.1s (1148 modules)
+ GET /login 200 in 16920ms
+ ✓ Compiled in 3s (397 modules)
+ GET /login?email=luqman.haider01%40gmail.com&password=Test1234 200 in 222ms
+ ○ Compiling /_not-found ...
+ ✓ Compiled /_not-found in 635ms (1121 modules)
+ GET /projects/w7SNK8HmowettwoUlfgP 404 in 1090ms
+ ○ Compiling /messages ...
+ ✓ Compiled /messages in 2.7s (1406 modules)
+ GET /messages 200 in 3333ms
+ GET /user.photoURL 404 in 80ms
+ ○ Compiling / ...
+ ✓ Compiled / in 2.2s (1487 modules)
+ GET / 200 in 2794ms
+ GET /login 200 in 71ms
+ GET /login 200 in 459ms
+ ○ Compiling /requests ...
+ ✓ Compiled /requests in 1010ms (1504 modules)
+ GET /requests 200 in 1292ms
+ ○ Compiling /requests/[id] ...
+ ✓ Compiled /requests/[id] in 8.7s (3135 modules)
+ GET /requests/w7SNK8HmowettwoUlfgP 200 in 10339ms
+ GET /login 200 in 801ms
+ ✓ Compiled in 2.9s (3144 modules)
