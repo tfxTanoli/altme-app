@@ -16,7 +16,7 @@ import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import type { PhotographerProfile, User, Review, PortfolioItem } from '@/lib/types';
 import { getImageUrl, cn } from '@/lib/utils';
-import { ArrowUpRight, Loader, Video, Star, MapPin } from 'lucide-react';
+import { ArrowUpRight, Loader, Video, Star, MapPin, Heart } from 'lucide-react';
 import {
     Carousel,
     CarouselContent,
@@ -28,6 +28,8 @@ import React from 'react';
 import { countries } from '@/lib/countries';
 import { useUser } from '@/firebase';
 
+import { useFavorites } from '@/hooks/use-favorites';
+
 
 type PhotographerCardProps = {
     photographer: User & { profile?: PhotographerProfile; portfolioItems?: PortfolioItem[], averageRating: number, reviewCount: number };
@@ -37,6 +39,7 @@ const PhotographerCard = React.memo(({
     photographer,
 }: PhotographerCardProps) => {
     const { user } = useUser();
+    const { isFavorite, toggleFavorite } = useFavorites(photographer.id, 'photographer');
     const photographerUser = photographer;
     const photographerProfile = photographer.profile;
     const portfolioItems = photographer.portfolioItems || [];
@@ -94,9 +97,19 @@ const PhotographerCard = React.memo(({
                         <AvatarFallback>{photographerUser.name.charAt(0)}</AvatarFallback>
                     </Avatar>
                     <div className="flex-1 overflow-hidden">
-                        <CardTitle className="text-lg truncate">
-                            {photographerUser.name}
-                        </CardTitle>
+                        <div className="flex justify-between items-start">
+                            <CardTitle className="text-lg truncate pr-2">
+                                {photographerUser.name}
+                            </CardTitle>
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 -mt-1 hover:bg-transparent"
+                                onClick={toggleFavorite}
+                            >
+                                <Heart className={cn("h-5 w-5 transition-colors", isFavorite ? "fill-red-500 text-red-500" : "text-muted-foreground")} />
+                            </Button>
+                        </div>
                         <div>
                             {reviewCount > 0 ? (
                                 <div className="flex items-center gap-1 text-sm text-muted-foreground mt-1">

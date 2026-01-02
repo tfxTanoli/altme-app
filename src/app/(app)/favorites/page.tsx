@@ -4,6 +4,7 @@
 import * as React from 'react';
 import { useFirestore, useUser, errorEmitter, FirestorePermissionError } from '@/firebase';
 import { collection, query, where, getDocs, onSnapshot, doc, limit, orderBy } from 'firebase/firestore';
+import { getDatabase, ref, get } from 'firebase/database';
 import type { User, PhotographerProfile, Review, PortfolioItem, ProjectRequest } from '@/lib/types';
 import { Loader, Heart } from 'lucide-react';
 import PhotographerCard from '@/components/photographers/photographer-card';
@@ -19,18 +20,18 @@ type EnrichedPhotographer = User & {
 };
 
 function splitIntoChunks<T>(array: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < array.length; i += size) {
-    chunks.push(array.slice(i, i + size));
-  }
-  return chunks;
+    const chunks: T[][] = [];
+    for (let i = 0; i < array.length; i += size) {
+        chunks.push(array.slice(i, i + size));
+    }
+    return chunks;
 }
 
 
 export default function FavoritesPage() {
     const firestore = useFirestore();
     const { user: currentUser, isUserLoading } = useUser();
-    
+
     const [favoritedPhotographers, setFavoritedPhotographers] = React.useState<EnrichedPhotographer[]>([]);
     const [favoritedRequests, setFavoritedRequests] = React.useState<ProjectRequest[]>([]);
     const [isLoading, setIsLoading] = React.useState(true);
@@ -38,54 +39,69 @@ export default function FavoritesPage() {
     const fetchFavorites = React.useCallback(async (photographerIds: string[], requestIds: string[]) => {
         if (!firestore) return;
         setIsLoading(true);
-        
+
         try {
             // Fetch photographers
             if (photographerIds.length > 0) {
                 const idChunks = splitIntoChunks(photographerIds, 30);
-                const photographerPromises = idChunks.map(async (chunk) => {
-                     const profileQuery = query(collection(firestore, 'photographerProfiles'), where('userId', 'in', chunk));
-                     const userQuery = query(collection(firestore, 'users'), where('__name__', 'in', chunk));
-                     const reviewsQuery = query(collection(firestore, 'reviews'), where('revieweeId', 'in', chunk));
+                const database = getDatabase();
 
-                    const [profileSnap, userSnap, reviewsSnap] = await Promise.all([
-                        getDocs(profileQuery),
-                        getDocs(userQuery),
+                const photographerPromises = idChunks.map(async (chunk) => {
+                    console.log("Processing chunk of IDs:", chunk);
+                    // Fetch Profiles from RTDB
+                    const profilePromises = chunk.map(id => get(ref(database, `photographerProfiles/${id}`)));
+                    const userPromises = chunk.map(id => get(ref(database, `users/${id}`)));
+                    const reviewsQuery = query(collection(firestore, 'reviews'), where('revieweeId', 'in', chunk));
+
+                    const [profileSnaps, userSnaps, reviewsSnap] = await Promise.all([
+                        Promise.all(profilePromises),
+                        Promise.all(userPromises),
                         getDocs(reviewsQuery)
                     ]);
-                    
-                    const usersMap = new Map(userSnap.docs.map(d => [d.id, { id: d.id, ...d.data() } as User]));
-                    const profilesMap = new Map(profileSnap.docs.map(d => {
-                        const p = d.data() as PhotographerProfile;
-                        return [p.userId, { id: d.id, ...p }];
-                    }));
+
+                    const usersMap = new Map();
+                    userSnaps.forEach(snap => {
+                        console.log(`User snap for ${snap.key}: exists=${snap.exists()}`);
+                        if (snap.exists()) usersMap.set(snap.key, { id: snap.key, ...snap.val() });
+                    });
+
+                    const profilesMap = new Map();
+                    profileSnaps.forEach(snap => {
+                        console.log(`Profile snap for ${snap.key}: exists=${snap.exists()}`);
+                        if (snap.exists()) profilesMap.set(snap.key, { id: snap.key, userId: snap.key, ...snap.val() });
+                    });
+
                     const reviewsMap = new Map<string, Review[]>();
                     reviewsSnap.forEach(d => {
                         const review = d.data() as Review;
-                        if(!reviewsMap.has(review.revieweeId)) reviewsMap.set(review.revieweeId, []);
+                        if (!reviewsMap.has(review.revieweeId)) reviewsMap.set(review.revieweeId, []);
                         reviewsMap.get(review.revieweeId)!.push(review);
                     });
 
-                    const portfolioPromises = profileSnap.docs.map(profileDoc => {
-                        const itemsQuery = query(collection(firestore, 'photographerProfiles', profileDoc.id, 'portfolioItems'), orderBy('createdAt', 'desc'), limit(10));
-                        return getDocs(itemsQuery).then(snapshot => ({
-                            profileId: profileDoc.id,
-                            items: snapshot.docs.map(d => ({ id: d.id, ...d.data() }) as PortfolioItem)
-                        }));
-                    });
-
-                    const portfolioResults = await Promise.all(portfolioPromises);
-                    const portfolioMap = new Map(portfolioResults.map(p => [p.profileId, p.items]));
-
                     const enriched: EnrichedPhotographer[] = [];
+
                     for (const userId of chunk) {
                         const user = usersMap.get(userId);
                         const profile = profilesMap.get(userId);
+
                         if (user && profile) {
                             const userReviews = reviewsMap.get(userId) || [];
                             const averageRating = userReviews.length > 0 ? userReviews.reduce((acc, r) => acc + r.rating, 0) / userReviews.length : 0;
-                            
-                            const portfolioItems = portfolioMap.get(profile.id) || [];
+
+                            let portfolioItems: PortfolioItem[] = [];
+                            if (profile.portfolioItems) {
+                                // @ts-ignore
+                                portfolioItems = Object.entries(profile.portfolioItems).map(([key, value]: [string, any]) => ({
+                                    id: key,
+                                    ...value
+                                }));
+                                // Sort by createdAt desc if possible
+                                portfolioItems.sort((a: any, b: any) => {
+                                    const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (Number(a.createdAt) || 0);
+                                    const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (Number(b.createdAt) || 0);
+                                    return timeB - timeA;
+                                });
+                            }
 
                             enriched.push({
                                 ...user,
@@ -94,26 +110,29 @@ export default function FavoritesPage() {
                                 averageRating,
                                 reviewCount: userReviews.length,
                             });
+                        } else {
+                            console.warn(`Missing data for ${userId}: User=${!!user}, Profile=${!!profile}`);
                         }
                     }
                     return enriched;
                 });
-                 const results = (await Promise.all(photographerPromises)).flat();
-                 setFavoritedPhotographers(results);
+                const results = (await Promise.all(photographerPromises)).flat();
+                console.log("Final favorited photographers:", results);
+                setFavoritedPhotographers(results);
             } else {
                 setFavoritedPhotographers([]);
             }
 
             // Fetch requests
             if (requestIds.length > 0) {
-                 const requests: ProjectRequest[] = [];
-                 const idChunks = splitIntoChunks(requestIds, 30);
-                 for (const chunk of idChunks) {
+                const requests: ProjectRequest[] = [];
+                const idChunks = splitIntoChunks(requestIds, 30);
+                for (const chunk of idChunks) {
                     if (chunk.length === 0) continue;
                     const requestsQuery = query(collection(firestore, 'requests'), where('__name__', 'in', chunk));
                     const snapshot = await getDocs(requestsQuery);
                     snapshot.forEach(doc => requests.push({ id: doc.id, ...doc.data() } as ProjectRequest));
-                 }
+                }
                 setFavoritedRequests(requests);
             } else {
                 setFavoritedRequests([]);
@@ -128,7 +147,7 @@ export default function FavoritesPage() {
             setIsLoading(false);
         }
     }, [firestore]);
-    
+
     React.useEffect(() => {
         if (isUserLoading || !firestore) {
             return;
@@ -153,15 +172,15 @@ export default function FavoritesPage() {
                 setFavoritedRequests([]);
             }
         },
-        (error) => {
-            console.error('Error listening to user favorites:', error);
-            errorEmitter.emit('permission-error', new FirestorePermissionError({
-                path: `users/${currentUser.uid}`,
-                operation: 'get',
-            }));
-            setIsLoading(false);
-        });
-        
+            (error) => {
+                console.error('Error listening to user favorites:', error);
+                errorEmitter.emit('permission-error', new FirestorePermissionError({
+                    path: `users/${currentUser.uid}`,
+                    operation: 'get',
+                }));
+                setIsLoading(false);
+            });
+
         return () => unsubscribe();
     }, [currentUser, firestore, isUserLoading, fetchFavorites]);
 
@@ -212,7 +231,7 @@ export default function FavoritesPage() {
                     </TabsContent>
                     <TabsContent value="projects">
                         <Card>
-                             <CardHeader>
+                            <CardHeader>
                                 <CardTitle>Favorite Projects</CardTitle>
                                 <CardDescription>Your saved list of interesting project requests.</CardDescription>
                             </CardHeader>
@@ -224,7 +243,7 @@ export default function FavoritesPage() {
                                         ))}
                                     </div>
                                 ) : (
-                                     renderEmptyState("No Favorite Projects", "Browse projects and click the heart to save them.")
+                                    renderEmptyState("No Favorite Projects", "Browse projects and click the heart to save them.")
                                 )}
                             </CardContent>
                         </Card>

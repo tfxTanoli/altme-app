@@ -7,7 +7,7 @@ import * as React from 'react';
 import { useFirestore, useMemoFirebase, useUser, addDocumentNonBlocking, initializeFirebase } from '@/firebase';
 import { sendNotification } from '@/services/notifications';
 import { doc, collection, query, where, limit, getDocs, serverTimestamp, writeBatch, getDoc, arrayUnion, arrayRemove, onSnapshot, updateDoc, setDoc, increment, orderBy } from 'firebase/firestore';
-import { getDatabase, ref, get, onValue } from 'firebase/database';
+import { getDatabase, ref, get, onValue, query as rtdbQuery, orderByChild, equalTo } from 'firebase/database';
 import type { PhotographerProfile, User, Review, ProjectRequest, PortfolioItem, ReferenceMedia, ChatRoom } from '@/lib/types';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -692,12 +692,13 @@ export default function PhotographerDetailPage({ params }: { params: Promise<{ i
         // In the browse page refactor, we iterate profiles. Ideally we should find the profile by userId.
         // But based on profile creation, profile ID usually matches user ID or we can try to fetch `photographerProfiles/${id}`.
         // If that fails, we might need to query. But let's assume direct access for now as per my previous assumption.
-        const profileRef = ref(database, `photographerProfiles/${id}`);
+        // Query profile by userId since profile ID is generated
+        const profilesRef = rtdbQuery(ref(database, 'photographerProfiles'), orderByChild('userId'), equalTo(id));
         const reviewsQuery = query(collection(firestore, 'reviews'), where('revieweeId', '==', id));
 
-        const [userSnap, profileSnap, reviewsSnap] = await Promise.all([
+        const [userSnap, profilesSnap, reviewsSnap] = await Promise.all([
           get(userRef),
-          get(profileRef),
+          get(profilesRef),
           getDocs(reviewsQuery)
         ]);
 
@@ -705,12 +706,14 @@ export default function PhotographerDetailPage({ params }: { params: Promise<{ i
           setUserData({ id: id, ...userSnap.val() } as User);
         } else {
           console.error("User not found in RTDB");
-          // Optional: Try Firestore fallback if you want, but likely not needed for new profiles
         }
 
-        if (profileSnap.exists()) {
-          const pData = profileSnap.val();
-          setPhotographerProfile({ id: id, ...pData } as PhotographerProfile);
+        if (profilesSnap.exists()) {
+          const profilesData = profilesSnap.val();
+          const profileId = Object.keys(profilesData)[0]; // get the first profile found
+          const pData = profilesData[profileId];
+
+          setPhotographerProfile({ id: profileId, ...pData } as PhotographerProfile);
 
           let pItems: PortfolioItem[] = [];
           if (pData.portfolioItems) {

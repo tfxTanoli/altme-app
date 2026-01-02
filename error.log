@@ -1,0 +1,17 @@
+﻿src/components/report-dialog.tsx(143,21): error TS2345: Argument of type '(prev: { url: string; type: "video" | "image"; }[]) => { url: string; type: string; }[]' is not assignable to parameter of type 'SetStateAction<{ url: string; type: "video" | "image"; }[]>'.
+  Type '(prev: { url: string; type: "video" | "image"; }[]) => { url: string; type: string; }[]' is not assignable to type '(prevState: { url: string; type: "video" | "image"; }[]) => { url: string; type: "video" | "image"; }[]'.
+    Type '{ url: string; type: string; }[]' is not assignable to type '{ url: string; type: "video" | "image"; }[]'.
+      Type '{ url: string; type: string; }' is not assignable to type '{ url: string; type: "video" | "image"; }'.
+        Types of property 'type' are incompatible.
+          Type 'string' is not assignable to type '"video" | "image"'.
+src/components/requests/request-form.tsx(176,37): error TS2554: Expected 2-3 arguments, but got 1.
+src/components/requests/request-form.tsx(177,46): error TS2345: Argument of type 'Blob | null' is not assignable to parameter of type 'Blob | MediaSource'.
+  Type 'null' is not assignable to type 'Blob | MediaSource'.
+src/components/requests/request-form.tsx(190,19): error TS2345: Argument of type '(prev: Preview[]) => { url: string; type: string; name: string; }[]' is not assignable to parameter of type 'SetStateAction<Preview[]>'.
+  Type '(prev: Preview[]) => { url: string; type: string; name: string; }[]' is not assignable to type '(prevState: Preview[]) => Preview[]'.
+    Type '{ url: string; type: string; name: string; }[]' is not assignable to type 'Preview[]'.
+      Type '{ url: string; type: string; name: string; }' is not assignable to type 'Preview'.
+        Types of property 'type' are incompatible.
+          Type 'string' is not assignable to type '"video" | "image"'.
+src/components/requests/request-form.tsx(264,58): error TS18047: 'newDocRef' is possibly 'null'.
+src/components/requests/request-form.tsx(264,79): error TS18047: 'newDocRef' is possibly 'null'.

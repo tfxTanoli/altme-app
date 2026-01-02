@@ -13,10 +13,11 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import type { ProjectRequest } from '@/lib/types';
-import { MapPin, Calendar, DollarSign, Clock, Star, ThumbsUp } from 'lucide-react';
+import { MapPin, Calendar, DollarSign, Clock, Star, ThumbsUp, Heart } from 'lucide-react';
 import { countries } from '@/lib/countries';
 import { useUser } from '@/firebase';
 import React from 'react';
+import { useFavorites } from '@/hooks/use-favorites';
 import {
   Tooltip,
   TooltipContent,
@@ -33,6 +34,7 @@ type RequestCardProps = {
 
 const RequestCard = React.memo(({ request, hideStatus = false, hasNotification = false }: RequestCardProps) => {
   const { user } = useUser();
+  const { isFavorite, toggleFavorite } = useFavorites(request.id, 'request');
 
   const isClientAwaitingPayment = request.status === 'Pending' && request.photographerRespondedAt && user?.uid === request.userId;
   const linkHref = user ? `/requests/${request.id}` : '/signup';
@@ -69,13 +71,24 @@ const RequestCard = React.memo(({ request, hideStatus = false, hasNotification =
       "flex flex-col h-full rounded-xl border bg-card text-card-foreground shadow",
       hasNotification && "border-primary"
     )}>
-      <CardHeader className="relative">
-        <Link href={linkHref} className="hover:underline">
-          <CardTitle className="leading-snug text-lg truncate">
-            {request.title}
-          </CardTitle>
-        </Link>
-        <div className='flex justify-between items-center'>
+      <CardHeader className="relative pb-2">
+        <div className="flex justify-between items-start gap-2">
+          <Link href={linkHref} className="hover:underline flex-1 min-w-0">
+            <CardTitle className="leading-snug text-lg truncate">
+              {request.title}
+            </CardTitle>
+          </Link>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 -mt-1 -mr-2 hover:bg-transparent"
+            onClick={toggleFavorite}
+          >
+            <Heart className={cn("h-4 w-4 transition-colors", isFavorite ? "fill-red-500 text-red-500" : "text-muted-foreground")} />
+          </Button>
+        </div>
+
+        <div className='flex justify-between items-center mt-1'>
           <CardDescription className="truncate">
             Posted by{' '}
             <Link href={user ? `/photographers/${request.userId}` : '/signup'} className="hover:underline text-foreground font-medium">
