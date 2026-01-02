@@ -8,6 +8,7 @@ import {
     AvatarFallback,
     AvatarImage,
 } from '@/components/ui/avatar';
+import { BackButton } from '@/components/ui/back-button';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -635,6 +636,9 @@ export default function RequestDetailPage({ params }: { params: Promise<{ id: st
             <main className="flex-1 bg-muted/40 py-8 px-4 md:px-6">
                 <div className="mx-auto grid max-w-6xl items-start gap-6 md:grid-cols-[1fr_350px]">
                     <div className="grid gap-6">
+                        <div className="flex items-center">
+                            <BackButton />
+                        </div>
                         <Card>
                             <CardHeader>
                                 <div className="flex items-center justify-between">
