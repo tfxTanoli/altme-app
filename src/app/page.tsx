@@ -92,23 +92,19 @@ export default function LandingPage() {
         const fetchFeatured = async () => {
             setIsLoadingProfiles(true);
             try {
-                // Fetch from RTDB (where photographer data lives)
-                const profilesRef = rtdbQuery(ref(database, 'photographerProfiles'), orderByChild('isAcceptingRequests'), equalTo(true));
-                const usersRef = ref(database, 'users');
-                const reviewsQuery = query(collection(firestore, 'reviews')); // Reviews are still in Firestore
-
-                const [profilesSnap, usersSnap, reviewsSnap] = await Promise.all([
-                    get(profilesRef),
-                    get(usersRef),
-                    getDocs(reviewsQuery)
-                ]);
-
-                // Process RTDB Profiles
-                const profiles: PhotographerProfile[] = [];
-                if (profilesSnap.exists()) {
-                    profilesSnap.forEach(childSnap => {
-                        profiles.push({ id: childSnap.key, ...childSnap.val() } as PhotographerProfile);
-                    });
+                // 1. Fetch Profiles from RTDB
+                let profiles: PhotographerProfile[] = [];
+                try {
+                    const profilesRef = rtdbQuery(ref(database, 'photographerProfiles'), orderByChild('isAcceptingRequests'), equalTo(true));
+                    const profilesSnap = await get(profilesRef);
+                    if (profilesSnap.exists()) {
+                        profilesSnap.forEach(childSnap => {
+                            profiles.push({ id: childSnap.key, ...childSnap.val() } as PhotographerProfile);
+                        });
+                    }
+                } catch (err) {
+                    console.error("Error fetching profiles:", err);
+                    throw err; // Critical failure
                 }
 
                 if (profiles.length === 0) {
@@ -117,26 +113,59 @@ export default function LandingPage() {
                     return;
                 }
 
-                // Process RTDB Users
+                // 2. Fetch Users from RTDB (Individually to avoid root read permissions/performance issues)
                 const usersMap = new Map<string, AppUser>();
-                if (usersSnap.exists()) {
-                    usersSnap.forEach(childSnap => {
-                        const userData = childSnap.val();
-                        if (userData.status !== 'deleted') {
-                            usersMap.set(childSnap.key as string, { id: childSnap.key, ...userData } as AppUser);
+                // Limit to fetching users for the profiles we found
+                const userPromises = profiles.map(async (p) => {
+                    try {
+                        const userRef = ref(database, `users/${p.userId}`);
+                        const snap = await get(userRef);
+                        if (snap.exists()) {
+                            return { id: snap.key, ...snap.val() } as AppUser;
                         }
-                    });
-                }
-
-                // Process Firestore Reviews
-                const reviewsMap = new Map<string, Review[]>();
-                reviewsSnap.forEach(doc => {
-                    const review = doc.data() as Review;
-                    if (!reviewsMap.has(review.revieweeId)) reviewsMap.set(review.revieweeId, []);
-                    reviewsMap.get(review.revieweeId)!.push(review);
+                    } catch (err) {
+                        console.warn(`Error fetching user ${p.userId}:`, err);
+                    }
+                    return null;
                 });
 
-                // Create enriched data from RTDB profiles
+                const usersResults = await Promise.all(userPromises);
+                usersResults.forEach(u => {
+                    if (u && u.status !== 'deleted') {
+                        usersMap.set(u.id, u);
+                    }
+                });
+
+                // 3. Fetch Reviews from Firestore (Batched by revieweeId to avoid scanning entire collection)
+                const reviewsMap = new Map<string, Review[]>();
+                const profileUserIds = profiles.map(p => p.userId).filter(id => usersMap.has(id));
+
+                // Firestore 'in' query supports max 30 items. chunking by 10 for safety.
+                const chunkSize = 10;
+                const chunks = [];
+                for (let i = 0; i < profileUserIds.length; i += chunkSize) {
+                    chunks.push(profileUserIds.slice(i, i + chunkSize));
+                }
+
+                const reviewPromises = chunks.map(chunk => {
+                    const reviewsQuery = query(
+                        collection(firestore, 'reviews'),
+                        where('revieweeId', 'in', chunk)
+                    );
+                    return getDocs(reviewsQuery);
+                });
+
+                const reviewsSnaps = await Promise.all(reviewPromises);
+
+                reviewsSnaps.forEach(snap => {
+                    snap.forEach(doc => {
+                        const review = doc.data() as Review;
+                        if (!reviewsMap.has(review.revieweeId)) reviewsMap.set(review.revieweeId, []);
+                        reviewsMap.get(review.revieweeId)!.push(review);
+                    });
+                });
+
+                // 4. Create Enriched Data
                 const enrichedData = profiles.map(profile => {
                     const user = usersMap.get(profile.userId);
                     if (!user) return null;
@@ -146,9 +175,8 @@ export default function LandingPage() {
                         ? userReviews.reduce((acc, r) => acc + r.rating, 0) / userReviews.length
                         : 0;
 
-                    // Extract portfolio items from the profile object (if nested in RTDB)
                     let portfolioItems: PortfolioItem[] = [];
-                    // @ts-ignore: Accessing potential child node
+                    // @ts-ignore
                     if (profile.portfolioItems) {
                         // @ts-ignore
                         portfolioItems = Object.entries(profile.portfolioItems).map(([key, value]: [string, any]) => ({
@@ -166,11 +194,11 @@ export default function LandingPage() {
                     };
                 });
 
-                // Filter out null values and only keep photographers with reviews
+                // Filter and Sort
                 const validPhotographers = enrichedData
-                    .filter((p): p is NonNullable<typeof p> => p !== null && p.reviewCount > 0)
+                    .filter((p): p is EnrichedPhotographer => p !== null && p.reviewCount > 0)
                     .sort((a, b) => b.reviewCount - a.reviewCount)
-                    .slice(0, 8) as EnrichedPhotographer[]; // Limit to 8 featured photographers
+                    .slice(0, 8);
 
                 setFeaturedPhotographers(validPhotographers);
 
