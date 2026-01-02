@@ -1,13 +1,13 @@
 {
     "rules": {
-        ".read": "auth != null",
-        ".write": "auth != null",
         "users": {
+            ".read": true,
             "$userId": {
                 ".write": "$userId === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'"
             }
         },
         "photographerProfiles": {
+            ".read": true,
             ".indexOn": [
                 "isAcceptingRequests"
             ],

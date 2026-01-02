@@ -12,6 +12,7 @@ import { signOut } from 'firebase/auth';
 import { useRouter } from 'next/navigation';
 import type { PhotographerProfile, User as AppUser, PortfolioItem, Review, ProjectRequest } from '@/lib/types';
 import { collection, query, limit, where, orderBy, getDocs } from 'firebase/firestore';
+import { ref, query as rtdbQuery, orderByChild, equalTo, get } from 'firebase/database';
 import React from 'react';
 import Autoplay from "embla-carousel-autoplay"
 import {
@@ -33,17 +34,17 @@ import { countries } from '@/lib/countries';
 import dynamic from 'next/dynamic';
 
 const PhotographerCard = dynamic(() => import('@/components/photographers/photographer-card'), {
-  loading: () => <Card className="h-[420px] animate-pulse bg-muted-foreground/20" />
+    loading: () => <Card className="h-[420px] animate-pulse bg-muted-foreground/20" />
 });
 
 const RequestCard = dynamic(() => import('@/components/requests/request-card'), {
-  loading: () => <Card className="h-[300px] animate-pulse bg-muted-foreground/20" />
+    loading: () => <Card className="h-[300px] animate-pulse bg-muted-foreground/20" />
 });
 
 
 type EnrichedPhotographer = AppUser & {
     profile: PhotographerProfile;
-    portfolioItems?: PortfolioItem[];
+    portfolioItems: PortfolioItem[];
     averageRating: number;
     reviewCount: number;
 };
@@ -86,51 +87,75 @@ export default function LandingPage() {
     }, [isUserLoading, user, router, database]);
 
     React.useEffect(() => {
-        if (!firestore) return;
+        if (!firestore || !database) return;
 
         const fetchFeatured = async () => {
             setIsLoadingProfiles(true);
             try {
-                // Limit to 4 profiles for faster initial load
-                const profilesQuery = query(collection(firestore, 'photographerProfiles'), limit(4));
-                const profilesSnap = await getDocs(profilesQuery);
+                // Fetch from RTDB (where photographer data lives)
+                const profilesRef = rtdbQuery(ref(database, 'photographerProfiles'), orderByChild('isAcceptingRequests'), equalTo(true));
+                const usersRef = ref(database, 'users');
+                const reviewsQuery = query(collection(firestore, 'reviews')); // Reviews are still in Firestore
 
-                const profileUserIds = profilesSnap.docs.map(doc => (doc.data() as PhotographerProfile).userId);
-                if (profileUserIds.length === 0) {
+                const [profilesSnap, usersSnap, reviewsSnap] = await Promise.all([
+                    get(profilesRef),
+                    get(usersRef),
+                    getDocs(reviewsQuery)
+                ]);
+
+                // Process RTDB Profiles
+                const profiles: PhotographerProfile[] = [];
+                if (profilesSnap.exists()) {
+                    profilesSnap.forEach(childSnap => {
+                        profiles.push({ id: childSnap.key, ...childSnap.val() } as PhotographerProfile);
+                    });
+                }
+
+                if (profiles.length === 0) {
                     setFeaturedPhotographers([]);
                     setIsLoadingProfiles(false);
                     return;
                 }
 
-                // Parallel queries for users and reviews
-                const usersQuery = query(collection(firestore, 'users'), where('__name__', 'in', profileUserIds));
-                const reviewsQuery = query(collection(firestore, 'reviews'), where('revieweeId', 'in', profileUserIds));
+                // Process RTDB Users
+                const usersMap = new Map<string, AppUser>();
+                if (usersSnap.exists()) {
+                    usersSnap.forEach(childSnap => {
+                        const userData = childSnap.val();
+                        if (userData.status !== 'deleted') {
+                            usersMap.set(childSnap.key as string, { id: childSnap.key, ...userData } as AppUser);
+                        }
+                    });
+                }
 
-                const [usersSnap, reviewsSnap] = await Promise.all([
-                    getDocs(usersQuery),
-                    getDocs(reviewsQuery)
-                ]);
-
-                const usersMap = new Map(usersSnap.docs.map(d => [d.id, { id: d.id, ...d.data() } as AppUser]));
+                // Process Firestore Reviews
                 const reviewsMap = new Map<string, Review[]>();
-                reviewsSnap.forEach(d => {
-                    const review = d.data() as Review;
+                reviewsSnap.forEach(doc => {
+                    const review = doc.data() as Review;
                     if (!reviewsMap.has(review.revieweeId)) reviewsMap.set(review.revieweeId, []);
                     reviewsMap.get(review.revieweeId)!.push(review);
                 });
 
-                // Fetch portfolio items in parallel for all profiles
-                const enrichedDataPromises = profilesSnap.docs.map(async (profileDoc): Promise<EnrichedPhotographer | null> => {
-                    const profile = { id: profileDoc.id, ...profileDoc.data() } as PhotographerProfile;
+                // Create enriched data from RTDB profiles
+                const enrichedData = profiles.map(profile => {
                     const user = usersMap.get(profile.userId);
                     if (!user) return null;
 
-                    const portfolioItemsQuery = query(collection(firestore, 'photographerProfiles', profile.id, 'portfolioItems'), orderBy('createdAt', 'desc'), limit(6));
-                    const portfolioSnap = await getDocs(portfolioItemsQuery);
-                    const portfolioItems = portfolioSnap.docs.map(d => ({ id: d.id, ...d.data() }) as PortfolioItem);
-
                     const userReviews = reviewsMap.get(profile.userId) || [];
-                    const averageRating = userReviews.length > 0 ? userReviews.reduce((acc, r) => acc + r.rating, 0) / userReviews.length : 0;
+                    const averageRating = userReviews.length > 0
+                        ? userReviews.reduce((acc, r) => acc + r.rating, 0) / userReviews.length
+                        : 0;
+
+                    // Extract portfolio items from the profile object (if nested in RTDB)
+                    let portfolioItems: PortfolioItem[] = [];
+                    // @ts-ignore: Accessing potential child node
+                    if (profile.portfolioItems) {
+                        // @ts-ignore
+                        portfolioItems = Object.entries(profile.portfolioItems).map(([key, value]: [string, any]) => ({
+                            id: key,
+                            ...value
+                        }));
+                    }
 
                     return {
                         ...user,
@@ -141,11 +166,13 @@ export default function LandingPage() {
                     };
                 });
 
-                const enrichedData = (await Promise.all(enrichedDataPromises))
-                    .filter((p): p is EnrichedPhotographer => p !== null)
-                    .sort((a, b) => b.reviewCount - a.reviewCount);
+                // Filter out null values and only keep photographers with reviews
+                const validPhotographers = enrichedData
+                    .filter((p): p is NonNullable<typeof p> => p !== null && p.reviewCount > 0)
+                    .sort((a, b) => b.reviewCount - a.reviewCount)
+                    .slice(0, 8) as EnrichedPhotographer[]; // Limit to 8 featured photographers
 
-                setFeaturedPhotographers(enrichedData);
+                setFeaturedPhotographers(validPhotographers);
 
             } catch (error) {
                 console.error("Error fetching featured profiles:", error);
@@ -175,7 +202,8 @@ export default function LandingPage() {
 
         // Fetch both in parallel
         Promise.all([fetchFeatured(), fetchLatestProjects()]);
-    }, [firestore]);
+    }, [firestore, database]);
+
 
 
     const handleLogout = async () => {
