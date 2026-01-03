@@ -45,6 +45,7 @@ const NotificationIcon: React.FC<{ type: Notification['type'] }> = ({ type }) =>
     case 'direct_booking_request':
       return <Briefcase className="h-4 w-4 text-blue-500" />;
     case 'direct_booking_approved':
+    case 'job_approved':
       return <ThumbsUp className="h-4 w-4 text-blue-500" />;
     case 'direct_booking_declined':
       return <XCircle className="h-4 w-4 text-destructive" />;

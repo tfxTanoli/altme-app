@@ -338,22 +338,34 @@ export default function AdminProjectsPage() {
             await batch.commit();
 
             // Send notification to photographer
-            await sendNotification(project.hiredPhotographerId, {
-                title: 'Booking Approved!',
-                message: `Your direct booking for "${project.title}" has been approved. You can now start working on it.`,
-                type: 'job_approved',
-                link: `/requests/${project.id}`,
-                relatedId: project.id
-            });
+            try {
+                await sendNotification(project.hiredPhotographerId, {
+                    title: 'Booking Approved!',
+                    message: `Your direct booking for "${project.title}" has been approved. You can now start working on it.`,
+                    type: 'job_approved',
+                    link: `/requests/${project.id}`,
+                    relatedId: project.id
+                });
+            } catch (err) {
+                console.error("Failed to notify photographer:", err);
+            }
 
             // Send notification to client who created the request
-            await sendNotification(project.userId, {
-                title: 'Job Request Approved!',
-                message: `Your job request "${project.title}" has been approved and is now in progress.`,
-                type: 'job_approved',
-                link: `/requests/${project.id}`,
-                relatedId: project.id
-            });
+            try {
+                if (project.userId) {
+                    await sendNotification(project.userId, {
+                        title: 'Job Request Approved!',
+                        message: `Your job request "${project.title}" has been approved and is now in progress.`,
+                        type: 'job_approved',
+                        link: `/requests/${project.id}`,
+                        relatedId: project.id
+                    });
+                } else {
+                    console.error("Cannot notify client: userId missing on project");
+                }
+            } catch (err) {
+                console.error("Failed to notify client:", err);
+            }
 
             toast({
                 title: 'Project Approved',
