@@ -9,7 +9,8 @@
         "photographerProfiles": {
             ".read": true,
             ".indexOn": [
-                "isAcceptingRequests"
+                "isAcceptingRequests",
+                "userId"
             ],
             "$photographerId": {
                 ".write": "$photographerId === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'"
