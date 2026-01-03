@@ -1,5 +1,6 @@
 import { getDatabase, ref, push, onValue, set, update, query, orderByChild, limitToLast, get, serverTimestamp } from 'firebase/database';
 import { initializeFirebase } from '@/firebase';
+import { sendNotificationEmail } from '@/actions/send-notification-email';
 
 // Initialize firebase to ensure we have the app instance
 const { database } = initializeFirebase();
@@ -29,6 +30,9 @@ export const sendNotification = async (userId: string, notification: Omit<Notifi
             timestamp: serverTimestamp(),
             isRead: false,
         });
+
+        // Send email notification (Server Action)
+        await sendNotificationEmail(userId, notification);
     } catch (error) {
         console.error("Error sending notification:", error);
     }
