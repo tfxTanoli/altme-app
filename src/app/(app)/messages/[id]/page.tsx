@@ -12,7 +12,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { ChatView } from '@/components/chat/chat-view';
 import { ChatList } from '@/components/chat/chat-list';
 
-export default function MessagesPage({ params, searchParams }: { params: { id: string }, searchParams: { partnerId?: string } }) {
+export default function MessagesPage({ params, searchParams }: { params: Promise<{ id: string }>, searchParams: Promise<{ partnerId?: string }> }) {
     const firestore = useFirestore();
     const { user: currentUser } = useUser();
     const router = useRouter();
@@ -25,8 +25,12 @@ export default function MessagesPage({ params, searchParams }: { params: { id: s
     // For "new" chats
     const [tempPartner, setTempPartner] = React.useState<User | null>(null);
 
-    const activeChatRoomId = params.id;
-    const newPartnerId = searchParams?.partnerId;
+    // Unwrap params and searchParams using React.use()
+    const unwrappedParams = React.use(params);
+    const unwrappedSearchParams = React.use(searchParams);
+
+    const activeChatRoomId = unwrappedParams.id;
+    const newPartnerId = unwrappedSearchParams?.partnerId;
 
     // Fetch all chat rooms and users for the list
     React.useEffect(() => {

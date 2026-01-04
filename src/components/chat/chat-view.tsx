@@ -375,18 +375,89 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     )}
                   >
                     {mediaUrl && msg.mediaName && (
-                      <a
-                        href={mediaUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={cn(
-                          "flex items-center gap-2 rounded-md p-2 transition-colors",
-                          alignRight ? "hover:bg-primary/80" : "hover:bg-muted-foreground/10"
-                        )}
-                      >
-                        {msg.mediaType === 'image' ? <FileImage className="h-5 w-5 shrink-0" /> : <FileVideo className="h-5 w-5 shrink-0" />}
-                        <span className="truncate text-sm font-medium">{msg.mediaName}</span>
-                      </a>
+                      <div className="space-y-2">
+                        <a
+                          href={mediaUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={cn(
+                            "group relative block overflow-hidden rounded-lg border transition-all duration-200",
+                            alignRight
+                              ? "border-primary-foreground/20 hover:border-primary-foreground/40"
+                              : "border-border hover:border-primary/40"
+                          )}
+                        >
+                          {msg.mediaType === 'image' ? (
+                            <div className="relative aspect-video w-full max-w-xs bg-muted/30">
+                              <Image
+                                src={msg.imageUrl!}
+                                alt={msg.mediaName}
+                                fill
+                                className="object-cover transition-transform duration-200 group-hover:scale-105"
+                                sizes="(max-width: 768px) 100vw, 400px"
+                              />
+                              <div className={cn(
+                                "absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+                              )} />
+                              <div className="absolute bottom-0 left-0 right-0 p-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                                <div className="flex items-center gap-2 text-white">
+                                  <FileImage className="h-4 w-4 shrink-0" />
+                                  <span className="text-xs font-medium truncate">{msg.mediaName}</span>
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="relative">
+                              {msg.thumbnailUrl ? (
+                                <div className="relative aspect-video w-full max-w-xs bg-muted/30">
+                                  <Image
+                                    src={msg.thumbnailUrl}
+                                    alt={msg.mediaName}
+                                    fill
+                                    className="object-cover"
+                                    sizes="(max-width: 768px) 100vw, 400px"
+                                  />
+                                  <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                                    <div className="rounded-full bg-white/90 p-3 shadow-lg">
+                                      <Video className="h-6 w-6 text-primary" />
+                                    </div>
+                                  </div>
+                                  <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/60 to-transparent">
+                                    <div className="flex items-center gap-2 text-white">
+                                      <FileVideo className="h-4 w-4 shrink-0" />
+                                      <span className="text-xs font-medium truncate">{msg.mediaName}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className={cn(
+                                  "flex items-center gap-3 p-4 rounded-lg transition-colors",
+                                  alignRight
+                                    ? "bg-primary-foreground/10 hover:bg-primary-foreground/20"
+                                    : "bg-muted hover:bg-muted/80"
+                                )}>
+                                  <div className={cn(
+                                    "rounded-lg p-2.5",
+                                    alignRight ? "bg-primary-foreground/20" : "bg-primary/10"
+                                  )}>
+                                    <FileVideo className={cn(
+                                      "h-5 w-5",
+                                      alignRight ? "text-primary-foreground" : "text-primary"
+                                    )} />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-medium truncate">{msg.mediaName}</p>
+                                    <p className={cn(
+                                      "text-xs mt-0.5",
+                                      alignRight ? "text-primary-foreground/60" : "text-muted-foreground"
+                                    )}>Video file</p>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </a>
+                      </div>
                     )}
                     {msg.message && <p className="whitespace-pre-wrap break-words px-1">{msg.message}</p>}
                     <p className={cn("text-xs mt-1 text-right px-1", alignRight ? "text-primary-foreground/70" : "text-muted-foreground")}>
