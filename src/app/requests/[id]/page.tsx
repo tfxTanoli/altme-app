@@ -827,8 +827,8 @@ export default function RequestDetailPage({ params }: { params: Promise<{ id: st
                                 <CardContent className="space-y-4">
                                     {clientReview && photographerReview ? (
                                         <>
-                                            <ReviewCard review={clientReview} reviewer={requestOwner || undefined} />
-                                            <ReviewCard review={photographerReview} reviewer={bids.find(b => b.userId === request.hiredPhotographerId)?.bidderUser} />
+                                            <ReviewCard review={clientReview} reviewer={reviewers[clientReview.reviewerId]} />
+                                            <ReviewCard review={photographerReview} reviewer={reviewers[photographerReview.reviewerId]} />
                                         </>
                                     ) : (
                                         <p className="text-muted-foreground">Reviews are pending.</p>
