@@ -292,7 +292,7 @@ function AppShellContent({ children }: { children: React.ReactNode }) {
           <div className="flex items-center gap-2 p-2">
             <Link href="/profile" className="flex items-center gap-2 flex-1 overflow-hidden">
               <Avatar className="h-8 w-8">
-                {user?.photoURL && <AvatarImage src={'user.photoURL'} alt="User" />}
+                {user?.photoURL && <AvatarImage src={user.photoURL} alt="User" />}
                 <AvatarFallback>{user?.displayName?.charAt(0) || user?.email?.charAt(0)}</AvatarFallback>
               </Avatar>
               <span className="text-sm font-medium duration-200 group-data-[collapsible=icon]:opacity-0 truncate">

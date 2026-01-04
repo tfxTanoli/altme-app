@@ -115,7 +115,7 @@ export const PortfolioGallery: React.FC<PortfolioGalleryProps> = ({
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
           {items.map((item) => (
             <div key={item.id} className="group relative aspect-square">
-              <a href={item.mediaUrl} target="_blank" rel="noopener noreferrer">
+              <a href={item.mediaUrl} target="_blank" rel="noopener noreferrer" className="relative block w-full h-full">
                 <Image
                   src={item.thumbnailUrl || item.mediaUrl}
                   alt={item.description || 'Portfolio Item'}

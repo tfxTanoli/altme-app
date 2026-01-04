@@ -13,7 +13,7 @@
                 "userId"
             ],
             "$photographerId": {
-                ".write": "$photographerId === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'"
+                ".write": "(data.exists() ? data.child('userId').val() === auth.uid : newData.child('userId').val() === auth.uid) || root.child('users').child(auth.uid).child('role').val() === 'admin'"
             }
         },
         "notifications": {
