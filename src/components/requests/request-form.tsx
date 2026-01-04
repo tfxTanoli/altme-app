@@ -42,7 +42,7 @@ import {
 import { Checkbox } from '@/components/ui/checkbox';
 import { countries } from '@/lib/countries';
 import { useFirestore, useUser, addDocumentNonBlocking, setDocumentNonBlocking, updateDocumentNonBlocking } from '@/firebase';
-import { collection, doc, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, serverTimestamp, updateDoc, addDoc, setDoc } from 'firebase/firestore';
 import type { ProjectRequest } from '@/lib/types';
 import { useRequestMediaUpload } from '@/hooks/use-request-media-upload';
 
@@ -62,7 +62,7 @@ const formSchema = z.object({
   country: z.string().optional(),
   location: z.string().optional(),
   datePreference: z.enum(['flexible', 'set-dates']).default('flexible'),
-  dateType: z.enum(['specific-date', 'delivery-deadline']).optional(),
+  dateType: z.enum(['specific-date', 'delivery-deadline']).optional().nullable(),
   dates: z.array(z.date()).optional(),
   budget: z.coerce.number().min(5, { message: "Budget must be at least $5." }).max(10000, { message: "Budget cannot exceed $10,000." }).optional(),
   copyrightOption: z.enum(['license', 'transfer']).default('license'),
@@ -96,13 +96,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
-    defaultValues: isEditMode ? {
-      ...request,
-      mediaTypes: request.mediaTypes || [],
-      dates: request.dates ? request.dates.map(d => parse(d, 'PPP', new Date())) : undefined,
-      copyrightOption: request.copyrightOption || 'license',
-      datePreference: request.dates && request.dates.length > 0 ? 'set-dates' : 'flexible',
-    } : {
+    defaultValues: {
       title: '',
       description: '',
       mediaTypes: [],
@@ -115,19 +109,46 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
     },
   });
 
+  // Reset form when request prop changes or on mount
+  React.useEffect(() => {
+    if (request) {
+      form.reset({
+        ...request,
+        mediaTypes: request.mediaTypes || [],
+        dates: request.dates ? request.dates.map(d => parse(d, 'PPP', new Date())) : undefined,
+        copyrightOption: request.copyrightOption || 'license',
+        datePreference: request.dates && request.dates.length > 0 ? 'set-dates' : 'flexible',
+        budget: request.budget,
+      });
+
+      if (request.referenceMedia) {
+        const existingPreviews: Preview[] = request.referenceMedia.map(media => ({
+          url: media.thumbnailUrl || media.url,
+          type: media.type,
+          name: media.name,
+        }));
+        setPreviews(existingPreviews);
+      }
+    } else {
+      form.reset({
+        title: '',
+        description: '',
+        mediaTypes: [],
+        videoDuration: '',
+        country: '',
+        location: '',
+        budget: '' as any,
+        datePreference: 'flexible',
+        copyrightOption: 'license',
+      })
+      setPreviews([]);
+    }
+  }, [request, form]);
+
   const datePreference = form.watch('datePreference');
   const mediaTypes = form.watch('mediaTypes');
 
   React.useEffect(() => {
-    // Populate previews if in edit mode and there's existing media
-    if (isEditMode && request?.referenceMedia) {
-      const existingPreviews = request.referenceMedia.map(media => ({
-        url: media.thumbnailUrl || media.url,
-        type: media.type,
-        name: media.name,
-      }));
-      setPreviews(existingPreviews);
-    }
     // Cleanup object URLs on unmount
     return () => {
       previews.forEach(preview => {
@@ -138,7 +159,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
       });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEditMode, request?.referenceMedia]);
+  }, []); // Only run cleanup on unmount
 
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -173,8 +194,10 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
 
         if (mediaType === 'video') {
           try {
-            const thumbBlob = await captureVideoFrame(file);
-            previewUrl = URL.createObjectURL(thumbBlob);
+            const thumbBlob = await captureVideoFrame(file, 'request-preview');
+            if (thumbBlob) {
+              previewUrl = URL.createObjectURL(thumbBlob);
+            }
           } catch (error) {
             console.error("Could not generate video thumbnail.", error);
           }
@@ -182,7 +205,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
 
         return {
           url: previewUrl,
-          type: mediaType,
+          type: mediaType as 'image' | 'video',
           name: file.name
         };
       }));
@@ -200,9 +223,17 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
     setPreviews(newPreviews);
 
     // Find the corresponding file in selectedFiles and remove it
-    const newFiles = [...selectedFiles];
-    newFiles.splice(index, 1);
-    setSelectedFiles(newFiles);
+    // Note: This logic assumes selectedFiles order matches added previews order for *new* files.
+    // However, since we mix existing (url) and new (blob), we need to be careful.
+    // The current implementation of removeFile might be buggy if we mix them.
+    // Keep logically for now: We only remove from selectedFiles if it was in selectedFiles.
+    // Simplified approach: Rebuilding selectedFiles is hard without IDs.
+    // Better: Just filter selectedFiles based on name?
+    // Current implementation:
+    const fileToRemove = selectedFiles.find(f => f.name === removedPreview.name);
+    if (fileToRemove) {
+      setSelectedFiles(prev => prev.filter(f => f !== fileToRemove));
+    }
 
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -211,6 +242,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
 
 
   async function onSubmit(values: z.infer<typeof formSchema>) {
+    console.log("onSubmit triggered with values:", values);
     if (!user || !firestore) {
       toast({
         variant: 'destructive',
@@ -223,8 +255,11 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
     setIsSubmitting(true);
 
     try {
-      const filesToUpload = selectedFiles.filter((_, index) => previews[index]?.url.startsWith('blob:'));
-      const referenceMediaUrls = await uploadFiles(filesToUpload);
+      const filesToUpload = selectedFiles.filter((_, index) => previews.some(p => p.url.startsWith('blob:') && p.name === selectedFiles[index]?.name));
+      // safer upload logic:
+      // Actually we can just upload all in selectedFiles.
+
+      const referenceMediaUrls = await uploadFiles(selectedFiles);
 
       const processedValues: any = {
         ...values,
@@ -234,7 +269,8 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
       };
 
       if (isEditMode) {
-        const existingMedia = request.referenceMedia?.filter(media => previews.some(p => p.url === (media.thumbnailUrl || media.url) && !p.url.startsWith('blob:'))) || [];
+        // Keep existing media that wasn't removed
+        const existingMedia = request.referenceMedia?.filter(media => previews.some(p => (p.url === media.url || p.url === media.thumbnailUrl) && !p.url.startsWith('blob:'))) || [];
         processedValues.referenceMedia = [...existingMedia, ...referenceMediaUrls];
       } else {
         processedValues.referenceMedia = referenceMediaUrls;
@@ -246,7 +282,9 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
         const updateData = Object.fromEntries(
           Object.entries(processedValues).filter(([_, v]) => v !== undefined)
         );
-        await updateDocumentNonBlocking(requestDocRef, updateData);
+
+        await updateDoc(requestDocRef, updateData);
+
         toast({
           title: 'Request Updated!',
           description: 'Your changes have been saved.',
@@ -260,8 +298,9 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
           status: 'Open' as const,
           createdAt: serverTimestamp(),
         };
-        const newDocRef = await addDocumentNonBlocking(requestsColRef, newRequestData);
-        await setDocumentNonBlocking(doc(requestsColRef, newDocRef.id), { id: newDocRef.id }, { merge: true });
+        const newDocRef = await addDoc(requestsColRef, newRequestData);
+        // We set the ID in the document itself for convenience
+        await setDoc(doc(requestsColRef, newDocRef.id), { id: newDocRef.id }, { merge: true });
 
         toast({
           title: 'Request Submitted!',
@@ -269,21 +308,24 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
         });
       }
 
-      form.reset();
+      // form.reset(); // Don't reset if we are just closing the dialog, or do?
+      // If closing dialog, state clears.
+      // If redirecting, state clears.
       setSelectedFiles([]);
-      setPreviews([]);
+      // setPreviews([]);
+
       if (onSuccess) {
         onSuccess();
       } else if (!isEditMode) {
         router.push('/requests/browse');
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error submitting request:", error);
       toast({
         variant: 'destructive',
         title: 'Something went wrong',
-        description: 'There was an issue saving your request. Please try again.',
+        description: error.message || 'There was an issue saving your request. Please try again.',
       });
     } finally {
       setIsSubmitting(false);
@@ -295,7 +337,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
 
   return (
     <Form {...form}>
-      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
+      <form onSubmit={form.handleSubmit(onSubmit, (errors) => console.log("Form Validation Errors:", errors))} className="space-y-8">
         <FormField
           control={form.control}
           name="title"
@@ -424,13 +466,13 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
                               <Checkbox
                                 checked={field.value?.includes(item)}
                                 onCheckedChange={(checked) => {
-                                  return checked
-                                    ? field.onChange([...(field.value || []), item])
-                                    : field.onChange(
-                                      field.value?.filter(
-                                        (value) => value !== item
-                                      )
-                                    )
+                                  if (checked) {
+                                    field.onChange([...(field.value || []), item]);
+                                  } else {
+                                    field.onChange(
+                                      field.value?.filter((value) => value !== item)
+                                    );
+                                  }
                                 }}
                               />
                             </FormControl>
@@ -558,7 +600,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
                       <FormControl>
                         <RadioGroup
                           onValueChange={field.onChange}
-                          defaultValue={field.value}
+                          defaultValue={field.value ?? undefined}
                           className="flex space-x-4"
                         >
                           <FormItem className="flex items-center space-x-2 space-y-0">
