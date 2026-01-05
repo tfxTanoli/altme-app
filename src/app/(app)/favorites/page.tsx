@@ -4,7 +4,7 @@
 import * as React from 'react';
 import { useFirestore, useUser, errorEmitter, FirestorePermissionError } from '@/firebase';
 import { collection, query, where, getDocs, onSnapshot, doc, limit, orderBy } from 'firebase/firestore';
-import { getDatabase, ref, get } from 'firebase/database';
+import { getDatabase, ref, get, query as rtdbQuery, orderByChild, equalTo } from 'firebase/database';
 import type { User, PhotographerProfile, Review, PortfolioItem, ProjectRequest } from '@/lib/types';
 import { Loader, Heart } from 'lucide-react';
 import PhotographerCard from '@/components/photographers/photographer-card';
@@ -48,8 +48,14 @@ export default function FavoritesPage() {
 
                 const photographerPromises = idChunks.map(async (chunk) => {
                     console.log("Processing chunk of IDs:", chunk);
-                    // Fetch Profiles from RTDB
-                    const profilePromises = chunk.map(id => get(ref(database, `photographerProfiles/${id}`)));
+                    // Fetch Profiles from RTDB by userId
+                    // Since profiles are keyed by a Push ID but we have the User ID (from favorites),
+                    // we need to query for the profile where userId matches.
+                    const profilePromises = chunk.map(id => {
+                        const profilesRef = rtdbQuery(ref(database, 'photographerProfiles'), orderByChild('userId'), equalTo(id));
+                        return get(profilesRef);
+                    });
+
                     const userPromises = chunk.map(id => get(ref(database, `users/${id}`)));
                     const reviewsQuery = query(collection(firestore, 'reviews'), where('revieweeId', 'in', chunk));
 
@@ -66,9 +72,18 @@ export default function FavoritesPage() {
                     });
 
                     const profilesMap = new Map();
-                    profileSnaps.forEach(snap => {
-                        console.log(`Profile snap for ${snap.key}: exists=${snap.exists()}`);
-                        if (snap.exists()) profilesMap.set(snap.key, { id: snap.key, userId: snap.key, ...snap.val() });
+                    profileSnaps.forEach((snap, index) => {
+                        // fetch is by query, so snap is a map of matches.
+                        // Since userId is unique per profile usually (1:1), we take the first.
+                        const requestedUserId = chunk[index];
+                        if (snap.exists()) {
+                            const data = snap.val();
+                            const profileId = Object.keys(data)[0];
+                            // Add the ID to the object
+                            profilesMap.set(requestedUserId, { id: profileId, ...data[profileId] });
+                        } else {
+                            console.log(`No profile found for user ${requestedUserId}`);
+                        }
                     });
 
                     const reviewsMap = new Map<string, Review[]>();
@@ -116,6 +131,7 @@ export default function FavoritesPage() {
                     }
                     return enriched;
                 });
+                // Await all chunk promises and flatten the result
                 const results = (await Promise.all(photographerPromises)).flat();
                 console.log("Final favorited photographers:", results);
                 setFavoritedPhotographers(results);
