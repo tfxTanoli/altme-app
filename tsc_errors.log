@@ -1,0 +1,11 @@
+﻿.next/types/app/(app)/messages/page.ts(34,29): error TS2344: Type '{ params: { id?: string | undefined; }; }' does not satisfy the constraint 'PageProps'.
+  Types of property 'params' are incompatible.
+    Type '{ id?: string | undefined; }' is missing the following properties from type 'Promise<any>': then, catch, finally, [Symbol.toStringTag]
+src/app/(app)/admin/chats/page.tsx(49,86): error TS2339: Property 'toDate' does not exist on type 'number'.
+src/app/(app)/admin/projects/page.tsx(37,8): error TS2300: Duplicate identifier 'Link'.
+src/app/(app)/admin/projects/page.tsx(38,8): error TS2300: Duplicate identifier 'Link'.
+src/app/(app)/admin/users/page.tsx(94,112): error TS2339: Property 'seconds' does not exist on type 'never'.
+src/app/(app)/admin/users/page.tsx(95,112): error TS2339: Property 'seconds' does not exist on type 'never'.
+src/app/(app)/admin/users/page.tsx(130,7): error TS2322: Type '"user" | "admin" | "photographer"' is not assignable to type '"user" | "admin"'.
+  Type '"photographer"' is not assignable to type '"user" | "admin"'.
+src/app/(app)/photographers/[id]/page.tsx(903,18): error TS2739: Type '{ items: PortfolioItem[]; }' is missing the following properties from type 'PortfolioGalleryProps': setItems, profileId, isOwnProfile, onUploadClick, isLoading

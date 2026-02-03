@@ -2,9 +2,8 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { useFirestore, errorEmitter, FirestorePermissionError, useUser, useDatabase } from '@/firebase';
-import { collection, query, orderBy, getDocs, where, doc, increment, updateDoc, getDoc } from 'firebase/firestore';
-import { ref, update, get } from 'firebase/database';
+import { useDatabase, useUser } from '@/firebase'; // Use useDatabase, removed Firestore imports
+import { ref, get, query, orderByChild, update } from 'firebase/database'; // RTDB imports
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Loader, User, FileText } from 'lucide-react';
@@ -22,11 +21,10 @@ type EnrichedReport = Report & {
 
 const ReportList = ({ reports, type }: { reports: EnrichedReport[], type: 'user' | 'request' }) => {
     const { user: currentUser } = useUser();
-    const firestore = useFirestore();
     const database = useDatabase();
 
     const handleReportRead = useCallback(async (reportId: string) => {
-        if (!currentUser || !firestore) return;
+        if (!currentUser || !database) return;
 
         const viewedReportKey = `viewed_report_${reportId}`;
         if (sessionStorage.getItem(viewedReportKey)) {
@@ -34,24 +32,22 @@ const ReportList = ({ reports, type }: { reports: EnrichedReport[], type: 'user'
         }
 
         try {
-            if (database) {
-                const userRef = ref(database, `users/${currentUser.uid}`);
-                // Fetch current count to decrement safely
-                const snapshot = await get(userRef);
-                if (snapshot.exists()) {
-                    const data = snapshot.val();
-                    const currentCount = data.openReportsCount || 0;
-                    if (currentCount > 0) {
-                        await update(userRef, { openReportsCount: currentCount - 1 });
-                    }
+            const userRef = ref(database, `users/${currentUser.uid}`);
+            // Fetch current count to decrement safely
+            const snapshot = await get(userRef);
+            if (snapshot.exists()) {
+                const data = snapshot.val();
+                const currentCount = data.openReportsCount || 0;
+                if (currentCount > 0) {
+                    await update(userRef, { openReportsCount: currentCount - 1 });
                 }
-                sessionStorage.setItem(viewedReportKey, 'true');
             }
+            sessionStorage.setItem(viewedReportKey, 'true');
         } catch (error) {
             console.error("Error marking report as read:", error);
         }
 
-    }, [currentUser, firestore, database]);
+    }, [currentUser, database]);
 
     if (reports.length === 0) {
         return (
@@ -87,7 +83,9 @@ const ReportList = ({ reports, type }: { reports: EnrichedReport[], type: 'user'
                                 </div>
                             </div>
                             <div className="text-sm text-muted-foreground">
-                                {report.createdAt?.seconds ? format(new Date(report.createdAt.seconds * 1000), 'PPP p') : 'N/A'}
+                                {typeof report.createdAt === 'number'
+                                    ? format(new Date(report.createdAt), 'PPP p')
+                                    : 'N/A'}
                             </div>
                         </div>
                     </AccordionTrigger>
@@ -111,58 +109,63 @@ const ReportList = ({ reports, type }: { reports: EnrichedReport[], type: 'user'
 
 
 export default function ReportsPage() {
-    const firestore = useFirestore();
+    const database = useDatabase();
     const [reports, setReports] = useState<EnrichedReport[]>([]);
     const [isLoading, setIsLoading] = useState(true);
 
     useEffect(() => {
-        if (!firestore) return;
+        if (!database) return;
 
         const fetchReports = async () => {
             setIsLoading(true);
             try {
-                const reportsRef = collection(firestore, 'reports');
-                const q = query(reportsRef, orderBy('createdAt', 'desc'));
-                const snapshot = await getDocs(q).catch(err => {
-                    console.error("Permission error (Reports List):", err);
-                    return { docs: [] };
-                });
+                // Fetch All Reports
+                const reportsRef = ref(database, 'reports');
+                // RTDB doesn't sort desc easily by default without quirks, so we fetch all and sort client side
+                // For Scalability this should be limited by limitToLast() etc, but fine for now.
+                const snapshot = await get(reportsRef);
 
-                const reportsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Report));
+                if (snapshot.exists()) {
+                    const data = snapshot.val();
+                    let reportsData = Object.keys(data).map(key => ({ id: key, ...data[key] } as Report));
 
-                if (reportsData.length > 0) {
-                    const userIds = new Set<string>();
-                    reportsData.forEach(r => {
-                        userIds.add(r.reporterId);
-                        userIds.add(r.reportedUserId);
+                    // Sort desc
+                    reportsData.sort((a, b) => {
+                        const tA = typeof a.createdAt === 'number' ? a.createdAt : new Date(a.createdAt as any).getTime();
+                        const tB = typeof b.createdAt === 'number' ? b.createdAt : new Date(b.createdAt as any).getTime();
+                        return tB - tA;
                     });
 
-                    const usersMap = new Map<string, AppUser>();
-                    const userIdChunks = Array.from(userIds).reduce((acc, item, i) => {
-                        const chunkIndex = Math.floor(i / 30);
-                        if (!acc[chunkIndex]) acc[chunkIndex] = [];
-                        acc[chunkIndex].push(item);
-                        return acc;
-                    }, [] as string[][]);
-
-                    for (const chunk of userIdChunks) {
-                        const usersQuery = query(collection(firestore, 'users'), where('__name__', 'in', chunk));
-                        const usersSnapshot = await getDocs(usersQuery).catch(err => {
-                            console.error("Permission error (Reports Users):", err);
-                            return { forEach: () => { } }; // Dummy object
+                    if (reportsData.length > 0) {
+                        const userIds = new Set<string>();
+                        reportsData.forEach(r => {
+                            if (r.reporterId) userIds.add(r.reporterId);
+                            if (r.reportedUserId) userIds.add(r.reportedUserId);
                         });
-                        usersSnapshot.forEach(doc => usersMap.set(doc.id, { id: doc.id, ...doc.data() } as AppUser));
-                    }
 
-                    const enriched = reportsData.map(r => ({
-                        ...r,
-                        reporter: usersMap.get(r.reporterId),
-                        reportedUser: usersMap.get(r.reportedUserId),
-                    }));
-                    setReports(enriched);
+                        const usersMap = new Map<string, AppUser>();
+
+                        // Concurrent fetch for users
+                        await Promise.all(Array.from(userIds).map(async (uid) => {
+                            const userSnap = await get(ref(database, `users/${uid}`));
+                            if (userSnap.exists()) {
+                                usersMap.set(uid, { id: uid, ...userSnap.val() } as AppUser);
+                            }
+                        }));
+
+                        const enriched = reportsData.map(r => ({
+                            ...r,
+                            reporter: usersMap.get(r.reporterId),
+                            reportedUser: usersMap.get(r.reportedUserId),
+                        }));
+                        setReports(enriched);
+                    } else {
+                        setReports([]);
+                    }
                 } else {
                     setReports([]);
                 }
+
             } catch (error) {
                 console.error("Error fetching reports:", error);
                 setReports([]);
@@ -172,7 +175,7 @@ export default function ReportsPage() {
         };
 
         fetchReports();
-    }, [firestore]);
+    }, [database]);
 
     const { userReports, jobReports } = useMemo(() => {
         const userReports = reports.filter(r => r.context.type === 'user');

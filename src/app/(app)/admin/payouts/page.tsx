@@ -2,8 +2,16 @@
 'use client';
 
 import * as React from 'react';
-import { useFirestore, errorEmitter, FirestorePermissionError, updateDocumentNonBlocking } from '@/firebase';
-import { collection, query, where, orderBy, getDocs, doc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { useDatabase } from '@/firebase'; // Use useDatabase
+import {
+    ref,
+    query,
+    orderByChild,
+    equalTo,
+    get,
+    update,
+    serverTimestamp
+} from 'firebase/database'; // RTDB imports
 import type { PayoutRequest, User } from '@/lib/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -19,54 +27,53 @@ type EnrichedPayoutRequest = PayoutRequest & {
 };
 
 export default function PayoutsPage() {
-    const firestore = useFirestore();
+    const database = useDatabase();
     const { toast } = useToast();
     const [requests, setRequests] = React.useState<EnrichedPayoutRequest[]>([]);
     const [isLoading, setIsLoading] = React.useState(true);
     const [isUpdating, setIsUpdating] = React.useState<string | null>(null);
 
     const fetchPayouts = React.useCallback(async () => {
-        if (!firestore) return;
+        if (!database) return;
         setIsLoading(true);
         try {
-            const requestsQuery = query(
-                collection(firestore, 'payoutRequests'),
-                where('status', '==', 'pending')
-            );
-            const snapshot = await getDocs(requestsQuery).catch(err => {
-                errorEmitter.emit('permission-error', new FirestorePermissionError({ path: 'payoutRequests', operation: 'list' }));
-                throw err;
-            });
+            const requestsRef = ref(database, 'payoutRequests');
+            const pendingRequestsQuery = query(requestsRef, orderByChild('status'), equalTo('pending'));
 
-            const requestsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as PayoutRequest));
-            // Sort client-side
-            requestsData.sort((a, b) => (a.requestedAt?.toMillis() || 0) - (b.requestedAt?.toMillis() || 0));
+            const snapshot = await get(pendingRequestsQuery);
 
-            if (requestsData.length > 0) {
-                const userIds = [...new Set(requestsData.map(r => r.userId).filter(Boolean))];
-                const usersMap = new Map<string, User>();
-                
-                if (userIds.length > 0) {
-                    const userIdChunks = userIds.reduce((acc, item, i) => {
-                        const chunkIndex = Math.floor(i / 30);
-                        if (!acc[chunkIndex]) acc[chunkIndex] = [];
-                        acc[chunkIndex].push(item);
-                        return acc;
-                    }, [] as string[][]);
+            if (snapshot.exists()) {
+                const data = snapshot.val();
+                let requestsData = Object.keys(data).map(key => ({ id: key, ...data[key] } as PayoutRequest));
 
-                    for (const chunk of userIdChunks) {
-                        if (chunk.length === 0) continue;
-                        const usersQuery = query(collection(firestore, 'users'), where('__name__', 'in', chunk));
-                        const usersSnapshot = await getDocs(usersQuery);
-                        usersSnapshot.forEach(doc => usersMap.set(doc.id, { id: doc.id, ...doc.data() } as User));
+                // Sort client-side by requestedAt (asc)
+                requestsData.sort((a, b) => {
+                    const tA = typeof a.requestedAt === 'number' ? a.requestedAt : new Date(a.requestedAt as any).getTime();
+                    const tB = typeof b.requestedAt === 'number' ? b.requestedAt : new Date(b.requestedAt as any).getTime();
+                    return tA - tB;
+                });
+
+                if (requestsData.length > 0) {
+                    const userIds = [...new Set(requestsData.map(r => r.userId).filter(Boolean))];
+                    const usersMap = new Map<string, User>();
+
+                    if (userIds.length > 0) {
+                        await Promise.all(userIds.map(async (uid) => {
+                            const userSnap = await get(ref(database, `users/${uid}`));
+                            if (userSnap.exists()) {
+                                usersMap.set(uid, { id: uid, ...userSnap.val() } as User);
+                            }
+                        }));
                     }
-                }
 
-                const enriched = requestsData.map(r => ({
-                    ...r,
-                    user: usersMap.get(r.userId),
-                })).filter(r => r.user); // Filter out requests where user data couldn't be found
-                setRequests(enriched);
+                    const enriched = requestsData.map(r => ({
+                        ...r,
+                        user: usersMap.get(r.userId),
+                    })).filter(r => r.user);
+                    setRequests(enriched);
+                } else {
+                    setRequests([]);
+                }
             } else {
                 setRequests([]);
             }
@@ -76,15 +83,15 @@ export default function PayoutsPage() {
         } finally {
             setIsLoading(false);
         }
-    }, [firestore]);
+    }, [database]);
 
 
     React.useEffect(() => {
         fetchPayouts();
     }, [fetchPayouts]);
-    
+
     const handleMarkAsPaid = async (request: EnrichedPayoutRequest) => {
-        if (!firestore || !request.user) return;
+        if (!database || !request.user) return;
 
         // Check for Stripe Account ID
         if (!request.user.stripeAccountId) {
@@ -97,7 +104,7 @@ export default function PayoutsPage() {
         }
 
         setIsUpdating(request.id);
-        
+
         try {
             // Call the Stripe transfer API
             const response = await fetch('/api/stripe/transfer', {
@@ -115,19 +122,17 @@ export default function PayoutsPage() {
             }
 
             const { transfer } = await response.json();
-            
-            // If transfer is successful, update the payout request status in Firestore
-            const requestRef = doc(firestore, 'payoutRequests', request.id);
-            const updateData = {
-                status: 'completed' as const,
-                completedAt: serverTimestamp()
-            };
 
-            await updateDoc(requestRef, updateData);
-            
+            // If transfer is successful, update the payout request status in RTDB
+            const updates: Record<string, any> = {};
+            updates[`payoutRequests/${request.id}/status`] = 'completed';
+            updates[`payoutRequests/${request.id}/completedAt`] = serverTimestamp();
+
+            await update(ref(database), updates);
+
             // Optimistically update the UI
             setRequests(prev => prev.filter(r => r.id !== request.id));
-            
+
             toast({
                 title: "Payout Processed",
                 description: `Successfully sent $${request.amount.toFixed(2)} to ${request.user.name}.`,
@@ -141,7 +146,7 @@ export default function PayoutsPage() {
                 description: error.message || 'Could not process the payout. Please check the logs.',
             });
         } finally {
-             setIsUpdating(null);
+            setIsUpdating(null);
         }
     };
 
@@ -189,12 +194,14 @@ export default function PayoutsPage() {
                                             </div>
                                         </TableCell>
                                         <TableCell>
-                                            {format(request.requestedAt.toDate(), 'PPP')}
+                                            {typeof request.requestedAt === 'number'
+                                                ? format(new Date(request.requestedAt), 'PPP')
+                                                : 'N/A'}
                                         </TableCell>
                                         <TableCell>${request.amount.toFixed(2)}</TableCell>
                                         <TableCell className="text-right">
-                                            <Button 
-                                                size="sm" 
+                                            <Button
+                                                size="sm"
                                                 onClick={() => handleMarkAsPaid(request)}
                                                 disabled={isUpdating === request.id}
                                             >

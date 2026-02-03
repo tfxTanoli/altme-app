@@ -7,12 +7,11 @@ import { Card } from '@/components/ui/card';
 import { Camera, Zap, Users, Star, ArrowUpRight, Loader, Search } from 'lucide-react';
 import Image from 'next/image';
 import { Logo } from '@/components/logo';
-import { useUser, useAuth, useFirestore, useFirebase } from '@/firebase';
+import { useUser, useAuth, useFirebase } from '@/firebase';
 import { signOut } from 'firebase/auth';
 import { useRouter } from 'next/navigation';
 import type { PhotographerProfile, User as AppUser, PortfolioItem, Review, ProjectRequest } from '@/lib/types';
-import { collection, query, limit, where, orderBy, getDocs } from 'firebase/firestore';
-import { ref, query as rtdbQuery, orderByChild, equalTo, get } from 'firebase/database';
+import { ref, query as rtdbQuery, orderByChild, equalTo, get, limitToLast as limit } from 'firebase/database';
 import React from 'react';
 import Autoplay from "embla-carousel-autoplay"
 import {
@@ -54,7 +53,6 @@ export default function LandingPage() {
     const { user, isUserLoading } = useUser();
     const auth = useAuth();
     const router = useRouter();
-    const firestore = useFirestore();
 
     const [featuredPhotographers, setFeaturedPhotographers] = React.useState<EnrichedPhotographer[]>([]);
     const [latestProjects, setLatestProjects] = React.useState<ProjectRequest[]>([]);
@@ -70,7 +68,6 @@ export default function LandingPage() {
     React.useEffect(() => {
         if (!isUserLoading && user) {
             if (database) {
-                const { ref, get } = require('firebase/database');
                 const userRef = ref(database, `users/${user.uid}`);
                 get(userRef).then((snapshot: any) => {
                     if (snapshot.exists() && snapshot.val().role === 'admin') {
@@ -86,8 +83,9 @@ export default function LandingPage() {
         }
     }, [isUserLoading, user, router, database]);
 
+
     React.useEffect(() => {
-        if (!firestore || !database) return;
+        if (!database) return;
 
         const fetchFeatured = async () => {
             setIsLoadingProfiles(true);
@@ -104,7 +102,7 @@ export default function LandingPage() {
                     }
                 } catch (err) {
                     console.error("Error fetching profiles:", err);
-                    throw err; // Critical failure
+                    throw err;
                 }
 
                 if (profiles.length === 0) {
@@ -113,9 +111,8 @@ export default function LandingPage() {
                     return;
                 }
 
-                // 2. Fetch Users from RTDB (Individually to avoid root read permissions/performance issues)
+                // 2. Fetch Users from RTDB
                 const usersMap = new Map<string, AppUser>();
-                // Limit to fetching users for the profiles we found
                 const userPromises = profiles.map(async (p) => {
                     try {
                         const userRef = ref(database, `users/${p.userId}`);
@@ -136,38 +133,53 @@ export default function LandingPage() {
                     }
                 });
 
-                // 3. Fetch Reviews from Firestore (Batched by revieweeId to avoid scanning entire collection)
+                // 3. Fetch Reviews from RTDB (Assuming 'reviews' node exists)
+                // If not migrated, this will be empty, which is fine for now.
+                // Structure: reviews/{reviewId} or reviews/{userId}/{reviewId}?
+                // Assuming root 'reviews' for now based on Firestore mapping. 
+                // Optimization: 'reviews' might be huge. If strictly mapped, we need index.
+                // Better: `users/{userId}/reviews` or `reviews` with `orderByChild('revieweeId')`.
+
                 const reviewsMap = new Map<string, Review[]>();
-                const profileUserIds = profiles.map(p => p.userId).filter(id => usersMap.has(id));
+                const validProfiles = profiles.filter(p => usersMap.has(p.userId));
 
-                // Firestore 'in' query supports max 30 items. chunking by 10 for safety.
-                const chunkSize = 10;
-                const chunks = [];
-                for (let i = 0; i < profileUserIds.length; i += chunkSize) {
-                    chunks.push(profileUserIds.slice(i, i + chunkSize));
-                }
+                await Promise.all(validProfiles.map(async (p) => {
+                    // Try fetching from `reviews` by revieweeId
+                    // Note: Requires index on 'revieweeId' in RTDB rules.
+                    try {
+                        const q = rtdbQuery(ref(database, 'reviews'), orderByChild('revieweeId'), equalTo(p.userId));
+                        const snap = await get(q);
+                        if (snap.exists()) {
+                            const userReviews: Review[] = [];
+                            snap.forEach(child => {
+                                userReviews.push({ id: child.key, ...child.val() } as Review);
+                            });
+                            reviewsMap.set(p.userId, userReviews);
+                        }
+                    } catch (e) {
+                        console.warn(`Failed to fetch reviews for ${p.userId}`, e);
+                    }
+                }));
 
-                const reviewPromises = chunks.map(chunk => {
-                    const reviewsQuery = query(
-                        collection(firestore, 'reviews'),
-                        where('revieweeId', 'in', chunk)
-                    );
-                    return getDocs(reviewsQuery);
-                });
-
-                const reviewsSnaps = await Promise.all(reviewPromises);
-
-                reviewsSnaps.forEach(snap => {
-                    snap.forEach(doc => {
-                        const review = doc.data() as Review;
-                        if (!reviewsMap.has(review.revieweeId)) reviewsMap.set(review.revieweeId, []);
-                        reviewsMap.get(review.revieweeId)!.push(review);
-                    });
-                });
 
                 // 4. Create Enriched Data
                 const enrichedData = profiles.map(profile => {
-                    const user = usersMap.get(profile.userId);
+                    let user = usersMap.get(profile.userId);
+
+                    // Fallback for guests who can't read users node
+                    if (!user && profile.name) {
+                        user = {
+                            id: profile.userId,
+                            name: profile.name,
+                            photoURL: profile.photoURL,
+                            role: 'photographer',
+                            status: 'active',
+                            email: '', // Not needed for display
+                            balance: 0,
+                            // Add other required fields with defaults if necessary
+                        } as AppUser;
+                    }
+
                     if (!user) return null;
 
                     const userReviews = reviewsMap.get(profile.userId) || [];
@@ -212,15 +224,24 @@ export default function LandingPage() {
         const fetchLatestProjects = async () => {
             setIsLoadingProjects(true);
             try {
-                const projectsQuery = query(
-                    collection(firestore, 'requests'),
-                    where('status', '==', 'Open'),
-                    orderBy('createdAt', 'desc'),
-                    limit(4)
-                );
-                const projectsSnap = await getDocs(projectsQuery);
-                const projects = projectsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as ProjectRequest));
-                setLatestProjects(projects);
+                // Fetch projects from RTDB
+                // Needs index on 'createdAt'
+                const projectsRef = rtdbQuery(ref(database, 'requests'), orderByChild('createdAt'), limit(20)); // limit to last 20
+                const snap = await get(projectsRef); // Returns ascending order
+                if (snap.exists()) {
+                    const projects: ProjectRequest[] = [];
+                    snap.forEach((child) => {
+                        const val = child.val();
+                        if (val.status === 'Open') {
+                            projects.push({ id: child.key, ...val } as ProjectRequest);
+                        }
+                    });
+                    // Reverse to get desc (newest first)
+                    projects.reverse();
+                    setLatestProjects(projects.slice(0, 4));
+                } else {
+                    setLatestProjects([]);
+                }
             } catch (error) {
                 console.error("Error fetching latest projects:", error);
             } finally {
@@ -230,7 +251,7 @@ export default function LandingPage() {
 
         // Fetch both in parallel
         Promise.all([fetchFeatured(), fetchLatestProjects()]);
-    }, [firestore, database]);
+    }, [database]);
 
 
 

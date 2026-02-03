@@ -1,5 +1,6 @@
 
 
+
 'use client';
 
 import * as React from 'react';
@@ -47,8 +48,7 @@ import { Logo } from '@/components/logo';
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback, AvatarImage } from '../ui/avatar';
 import { getImageUrl } from '@/lib/utils';
-import { useAuth, useUser, useFirestore, useDatabase, useMemoFirebase, errorEmitter, FirestorePermissionError } from '@/firebase';
-import { doc, collection, query, where, getDocs, getDoc, onSnapshot, setDoc } from 'firebase/firestore';
+import { useAuth, useUser, useDatabase } from '@/firebase';
 import { ref, onValue } from 'firebase/database';
 import type { ProjectRequest, User as AppUser, ChatRoom } from '@/lib/types';
 import { NotificationBell } from '../notifications/notification-bell';
@@ -346,7 +346,6 @@ function AppShellLogic({ children }: { children: React.ReactNode }) {
   const [userRole, setUserRole] = React.useState<string | null>(null);
   const [isRoleLoading, setIsRoleLoading] = React.useState(true);
   const database = useDatabase();
-  const firestore = useFirestore();
 
   React.useEffect(() => {
     if (isUserLoading) {
@@ -375,29 +374,6 @@ function AppShellLogic({ children }: { children: React.ReactNode }) {
 
     return () => unsubscribe();
   }, [user, isUserLoading, database]);
-
-  // Auto-sync role to Firestore to ensure Security Rules pass
-  React.useEffect(() => {
-    if (userRole === 'admin' && user && firestore) {
-      const syncRoleToFirestore = async () => {
-        try {
-          const userDocRef = doc(firestore, 'users', user.uid);
-          // Check if we need to update to avoid infinite loops or redundant writes
-          const userSnap = await getDoc(userDocRef);
-          if (userSnap.exists() && userSnap.data().role !== 'admin') {
-            console.log("Syncing admin role to Firestore...");
-            await setDoc(userDocRef, { role: 'admin' }, { merge: true });
-            console.log("Synced admin role to Firestore.");
-          }
-        } catch (error) {
-          console.error("Failed to sync admin role to Firestore:", error);
-          // We don't block the UI here, just log it.
-          // If this fails, the user might still see permission errors in other views.
-        }
-      };
-      syncRoleToFirestore();
-    }
-  }, [userRole, user, firestore]);
 
   if (isUserLoading || isRoleLoading) {
     return (

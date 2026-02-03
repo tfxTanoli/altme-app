@@ -1,15 +1,18 @@
 
 
-import { Timestamp } from "firebase/firestore";
+// RTDB uses numbers for timestamps (milliseconds)
+export type Timestamp = number;
 
 export type User = {
     id: string;
     name: string;
+    displayName?: string; // Added for compatibility
     email: string;
-    role: 'user' | 'admin';
+    role: 'user' | 'admin' | 'photographer'; // Added photographer
     status: 'active' | 'deleted';
     photoURL?: string;
     bio?: string;
+    location?: string; // Added location
     balance: number;
     joinDate?: Timestamp;
     showActivityStatus?: boolean;
@@ -23,16 +26,24 @@ export type User = {
     disputedProjectsCount?: number;
     unreadContactSubmissionsCount?: number;
     readNotificationIds?: string[];
+    isAvailable?: boolean; // Added isAvailable
 }
 
 export type PhotographerProfile = {
     id: string;
     userId: string;
     bio?: string;
+    location?: string; // Added location
     serviceCountry?: string;
     areas?: string[];
     isAcceptingRequests?: boolean;
     portfolioItemIds?: string[];
+    coverPhotoUrl?: string; // Added coverPhotoUrl
+    equipment?: string[]; // Added equipment
+    specialties?: string[]; // Added specialties
+    hourlyRate?: number; // Added hourlyRate
+    name?: string; // Denormalized for public access
+    photoURL?: string; // Denormalized for public access
 };
 
 export type PortfolioItem = {

@@ -2,9 +2,9 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import { useFirestore, useStorage, useUser } from '@/firebase';
+import { useDatabase, useStorage, useUser } from '@/firebase';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { collection, serverTimestamp, doc, writeBatch, arrayUnion } from 'firebase/firestore';
+import { ref as dbRef, update, push, serverTimestamp, get } from 'firebase/database';
 import { useToast } from './use-toast';
 import type { ProjectRequest, ContentDelivery, ReferenceMedia } from '@/lib/types';
 import { captureVideoFrame } from '@/lib/utils';
@@ -17,7 +17,7 @@ export const useContentDeliveryUpload = (
 ) => {
     const { user } = useUser();
     const storage = useStorage();
-    const firestore = useFirestore();
+    const database = useDatabase();
     const { toast } = useToast();
 
     const [isUploading, setIsUploading] = useState(false);
@@ -29,7 +29,7 @@ export const useContentDeliveryUpload = (
             return;
         }
 
-        if (!user || !firestore || !storage) {
+        if (!user || !database || !storage) {
             toast({
                 variant: 'destructive',
                 title: 'Cannot upload media',
@@ -81,35 +81,55 @@ export const useContentDeliveryUpload = (
             }
 
             if (mediaToUpload.length > 0) {
-                const batch = writeBatch(firestore);
                 const existingDelivery = deliveries.length > 0 ? deliveries[0] : null;
+                const updates: Record<string, any> = {};
+                let deliveryId = existingDelivery?.id;
 
                 if (existingDelivery) {
-                    // Add to existing delivery
-                    const deliveryDocRef = doc(firestore, 'requests', requestId, 'contentDeliveries', existingDelivery.id);
-                    batch.update(deliveryDocRef, {
-                        files: arrayUnion(...mediaToUpload)
-                    });
+                    // Append to existing delivery
+                    // In RTDB, to append to an array, we need to know the index or use push keys.
+                    // If 'files' is an array, we need to read it first or replace it?
+                    // Safe way: Read current files, append, write back.
+                    // OR use map structure for files.
+                    // Given explicit array type in ReferenceMedia[], let's assume array.
+                    // But to avoid race conditions, we should ideally use transaction or push keys.
+                    // For now, let's just append to the list using a new push key logic if we change structure, OR read-modify-write.
+                    // Since we have `deliveries` prop, we know the *current* state (optimistically).
+                    // But let's be safe and just write to a new index if it's an array?
+                    // RTDB arrays are object with integer keys.
+                    // To append: `contentDeliveries/.../files/${nextIndex}` = item.
+                    // Finding `nextIndex` is hard without reading.
+
+                    // Let's use `get` to safeguard.
+                    const deliveryRef = dbRef(database, `contentDeliveries/${requestId}/${deliveryId}`);
+                    const snap = await get(deliveryRef);
+                    if (snap.exists()) {
+                        const currentData = snap.val() as ContentDelivery;
+                        const currentFiles = currentData.files || [];
+                        const newFiles = [...currentFiles, ...mediaToUpload];
+                        updates[`contentDeliveries/${requestId}/${deliveryId}/files`] = newFiles;
+                    }
                 } else {
                     // Create new delivery
-                    const deliveryDocRef = doc(collection(firestore, 'requests', requestId, 'contentDeliveries'));
+                    const newDeliveryRef = push(dbRef(database, `contentDeliveries/${requestId}`));
+                    deliveryId = newDeliveryRef.key!;
+
                     const deliveryData: ContentDelivery = {
-                        id: deliveryDocRef.id,
+                        id: deliveryId,
                         requestId: requestId,
                         files: mediaToUpload,
-                        deliveryDate: serverTimestamp() as any,
+                        deliveryDate: serverTimestamp() as any, // RTDB timestamp placeholder
                         isApproved: false
                     };
-                    batch.set(deliveryDocRef, deliveryData);
+                    updates[`contentDeliveries/${requestId}/${deliveryId}`] = deliveryData;
                 }
 
                 // Update request status to 'Delivered' if it's 'In Progress'
                 if (request.status === 'In Progress') {
-                    const requestRef = doc(firestore, 'requests', requestId);
-                    batch.update(requestRef, { status: 'Delivered' });
+                    updates[`requests/${requestId}/status`] = 'Delivered';
                 }
 
-                await batch.commit();
+                await update(dbRef(database), updates);
 
                 await sendNotification(request.userId, {
                     title: 'Delivery Submitted',

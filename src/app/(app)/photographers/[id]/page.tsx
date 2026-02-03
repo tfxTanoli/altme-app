@@ -1,29 +1,34 @@
-
-
 'use client';
 
 import { notFound, useRouter } from 'next/navigation';
 import * as React from 'react';
-import { useFirestore, useMemoFirebase, useUser, addDocumentNonBlocking, initializeFirebase } from '@/firebase';
+import { useUser, useDatabase } from '@/firebase';
 import { sendNotification } from '@/services/notifications';
-import { doc, collection, query, where, limit, getDocs, serverTimestamp, writeBatch, getDoc, arrayUnion, arrayRemove, onSnapshot, updateDoc, setDoc, increment, orderBy } from 'firebase/firestore';
-import { getDatabase, ref, get, onValue, query as rtdbQuery, orderByChild, equalTo } from 'firebase/database';
-import type { PhotographerProfile, User, Review, ProjectRequest, PortfolioItem, ReferenceMedia, ChatRoom } from '@/lib/types';
+import {
+  ref,
+  get,
+  onValue,
+  push,
+  update,
+  set,
+  query,
+  orderByChild,
+  equalTo,
+  serverTimestamp,
+  runTransaction
+} from 'firebase/database';
+import type { PhotographerProfile, User, Review, ProjectRequest, PortfolioItem } from '@/lib/types';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Loader, Mail, MapPin, Star, Flag, Heart, MessageSquare, Copyright, Upload, Video, X, CalendarIcon, Check, Edit } from 'lucide-react';
-import Link from 'next/link';
+import { Loader, MapPin, Star, Heart, MessageSquare, Upload, Video, X, CalendarIcon, Check } from 'lucide-react';
 import { cn, captureVideoFrame } from '@/lib/utils';
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
-import { ReportDialog } from '@/components/report-dialog';
 import { PortfolioGallery } from '@/components/photographers/portfolio-gallery';
-import { countries } from '@/lib/countries';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -38,23 +43,13 @@ import {
 } from '@/components/ui/popover';
 import { Calendar } from '@/components/ui/calendar';
 import { format } from 'date-fns';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
 import { Elements } from '@stripe/react-stripe-js';
 import { loadStripe } from '@stripe/stripe-js';
 import CheckoutForm from '@/components/stripe/checkout-form';
-import { ChatView } from '@/components/chat/chat-view';
+import { useFavorites } from '@/hooks/use-favorites';
 
 const MAX_REFERENCE_MEDIA = 10;
-const PLATFORM_FEE_PERCENTAGE = 0.15; // 15% platform fee
+const PLATFORM_FEE_PERCENTAGE = 0.15;
 
 const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!);
 
@@ -63,7 +58,6 @@ type Preview = {
   type: 'image' | 'video';
   name: string;
 };
-
 
 const DisplayReviewCard = ({ review, reviewer }: { review: Review, reviewer?: User | null }) => {
   if (!reviewer) {
@@ -96,7 +90,6 @@ const DisplayReviewCard = ({ review, reviewer }: { review: Review, reviewer?: Us
   );
 };
 
-
 const bookingFormSchema = z.object({
   budget: z.coerce.number().min(5, { message: "Budget must be at least $5." }).max(10000, { message: "Budget cannot exceed $10,000." }),
   description: z.string().min(10, { message: "Description must be at least 10 characters." }),
@@ -108,7 +101,7 @@ const bookingFormSchema = z.object({
 
 const BookNowDialog = ({ photographer, open, onOpenChange }: { photographer: User, open: boolean, onOpenChange: (open: boolean) => void }) => {
   const { user: currentUser } = useUser();
-  const firestore = useFirestore();
+  const database = useDatabase();
   const { toast } = useToast();
   const router = useRouter();
 
@@ -217,7 +210,7 @@ const BookNowDialog = ({ photographer, open, onOpenChange }: { photographer: Use
 
 
   const onSubmit = async (values: z.infer<typeof bookingFormSchema>) => {
-    if (!currentUser || !firestore) {
+    if (!currentUser || !database) {
       toast({
         variant: "destructive",
         title: "Error",
@@ -277,12 +270,14 @@ const BookNowDialog = ({ photographer, open, onOpenChange }: { photographer: Use
   };
 
   const handlePaymentSuccess = async () => {
-    if (!currentUser || !firestore || !pendingBookingData) return;
+    if (!currentUser || !database || !pendingBookingData) return;
 
     try {
-      const newRequestRef = doc(collection(firestore, "requests"));
+      const requestsRef = ref(database, 'requests');
+      const newRequestRef = push(requestsRef);
+
       const newRequestData: Partial<ProjectRequest> = {
-        id: newRequestRef.id,
+        id: newRequestRef.key as string,
         title: pendingBookingData.title,
         description: pendingBookingData.description,
         budget: pendingBookingData.budget,
@@ -299,15 +294,16 @@ const BookNowDialog = ({ photographer, open, onOpenChange }: { photographer: Use
         referenceMedia: pendingBookingData.referenceMedia,
         location: '',
       };
-      await setDoc(newRequestRef, newRequestData);
+
+      await set(newRequestRef, newRequestData);
 
       // Send notification to the photographer
       await sendNotification(photographer.id, {
         type: 'direct_booking_request',
         title: 'New Booking Request',
         message: `You have received a new booking request from ${currentUser.displayName || 'a client'} for "${pendingBookingData.title}".`,
-        link: `/requests/${newRequestRef.id}`,
-        relatedId: newRequestRef.id
+        link: `/requests/${newRequestRef.key}`,
+        relatedId: newRequestRef.key as string
       });
 
       toast({
@@ -316,7 +312,7 @@ const BookNowDialog = ({ photographer, open, onOpenChange }: { photographer: Use
       });
       setIsPaymentDialogOpen(false);
       onOpenChange(false);
-      router.push(`/requests/${newRequestRef.id}`);
+      router.push(`/requests/${newRequestRef.key}`);
 
     } catch (error) {
       console.error("Error creating direct booking:", error);
@@ -640,9 +636,9 @@ const BookNowDialog = ({ photographer, open, onOpenChange }: { photographer: Use
 
 
 export default function PhotographerDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = React.use(params); // Unwrap params Promise for Next.js 15 compatibility
-  const firestore = useFirestore();
+  const { id } = React.use(params);
   const { user: currentUser } = useUser();
+  const database = useDatabase();
   const router = useRouter();
   const { toast } = useToast();
 
@@ -655,63 +651,37 @@ export default function PhotographerDetailPage({ params }: { params: Promise<{ i
   const [isLoading, setIsLoading] = React.useState(true);
   const [isBookNowOpen, setIsBookNowOpen] = React.useState(false);
   const [isStartingChat, setIsStartingChat] = React.useState(false);
-  const [currentUserData, setCurrentUserData] = React.useState<User | null>(null);
-  const [bidToAccept, setBidToAccept] = React.useState<any | null>(null);
-  const [clientSecret, setClientSecret] = React.useState<string | null>(null);
-  const [isPaymentDialogOpen, setIsPaymentDialogOpen] = React.useState(false);
+  const [currentUserData, setCurrentUserData] = React.useState<User | null>(null); // Kept for other uses if needed, but favorites handled by hook
 
+  const { isFavorite, toggleFavorite } = useFavorites(id, 'photographer');
 
   React.useEffect(() => {
-    if (!firestore) return;
+    if (!database || !id) return;
 
-    if (currentUser) {
-      const { database } = initializeFirebase();
-      const userRef = ref(database, `users/${currentUser.uid}`);
-      const unsub = onValue(userRef, (snapshot) => {
-        if (snapshot.exists()) {
-          setCurrentUserData({ id: currentUser.uid, ...snapshot.val() } as User);
-        }
-      }, (error) => {
-        console.error(`Error listening to current user data:`, error);
-      });
-      return () => unsub();
-    }
-  }, [firestore, currentUser]);
-
-  React.useEffect(() => {
-    if (!firestore || !id) return;
-
-    let unsubPortfolio: (() => void) | undefined;
     const fetchData = async () => {
       setIsLoading(true);
 
       try {
-        const { database } = initializeFirebase();
         const userRef = ref(database, `users/${id}`);
-        // Assuming the profile ID is the same as the user ID for simplicity in migration
-        // In the browse page refactor, we iterate profiles. Ideally we should find the profile by userId.
-        // But based on profile creation, profile ID usually matches user ID or we can try to fetch `photographerProfiles/${id}`.
-        // If that fails, we might need to query. But let's assume direct access for now as per my previous assumption.
-        // Query profile by userId since profile ID is generated
-        const profilesRef = rtdbQuery(ref(database, 'photographerProfiles'), orderByChild('userId'), equalTo(id));
-        const reviewsQuery = query(collection(firestore, 'reviews'), where('revieweeId', '==', id));
+        // Query profile by userId
+        const profilesQuery = query(ref(database, 'photographerProfiles'), orderByChild('userId'), equalTo(id));
+        const reviewsQuery = query(ref(database, 'reviews'), orderByChild('revieweeId'), equalTo(id));
 
         const [userSnap, profilesSnap, reviewsSnap] = await Promise.all([
           get(userRef),
-          get(profilesRef),
-          getDocs(reviewsQuery)
+          get(profilesQuery),
+          get(reviewsQuery)
         ]);
 
         if (userSnap.exists()) {
           setUserData({ id: id, ...userSnap.val() } as User);
-        } else {
-          console.error("User not found in RTDB");
         }
 
         if (profilesSnap.exists()) {
-          const profilesData = profilesSnap.val();
-          const profileId = Object.keys(profilesData)[0]; // get the first profile found
-          const pData = profilesData[profileId];
+          // profilesSnap.val() is an object map of profiles
+          const profilesMap = profilesSnap.val();
+          const profileId = Object.keys(profilesMap)[0];
+          const pData = profilesMap[profileId];
 
           setPhotographerProfile({ id: profileId, ...pData } as PhotographerProfile);
 
@@ -721,21 +691,26 @@ export default function PhotographerDetailPage({ params }: { params: Promise<{ i
               id: key,
               ...value
             }));
-            // Sort by createdAt desc
+            // Sort by createdAt desc if available
             pItems.sort((a, b) => {
-              const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (Number(a.createdAt) || 0);
-              const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (Number(b.createdAt) || 0);
-              return (timeB as number) - (timeA as number);
+              const timeA = a.createdAt || 0;
+              const timeB = b.createdAt || 0;
+              return Number(timeB) - Number(timeA);
             });
           }
           setPortfolioItems(pItems);
         }
 
-        const reviews = reviewsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Review));
+        const reviews: Review[] = [];
+        if (reviewsSnap.exists()) {
+          reviewsSnap.forEach(child => {
+            reviews.push({ id: child.key, ...child.val() } as Review);
+          });
+        }
         setAllReviews(reviews);
 
-        // Fetch reviewers (users) from RTDB
-        const reviewerIds = Array.from(new Set(reviews.map(r => r.reviewerId)));
+        // Fetch reviewers (users)
+        const reviewerIds = [...new Set(reviews.map(r => r.reviewerId))];
         if (reviewerIds.length > 0) {
           const reviewersMap: Record<string, User> = {};
           await Promise.all(reviewerIds.map(async (reviewerId) => {
@@ -748,11 +723,22 @@ export default function PhotographerDetailPage({ params }: { params: Promise<{ i
           setReviewers(reviewersMap);
         }
 
-        // Fetch My Open Requests (if logged in)
+        // Fetch My Open Requests
         if (currentUser) {
-          const myRequestsQuery = query(collection(firestore, 'requests'), where('userId', '==', currentUser.uid), where('status', '==', 'Open'));
-          const myRequestsSnap = await getDocs(myRequestsQuery);
-          setMyOpenRequests(myRequestsSnap.docs.map(d => ({ id: d.id, ...d.data() } as ProjectRequest)));
+          const requestsQuery = query(ref(database, 'requests'), orderByChild('userId'), equalTo(currentUser.uid));
+          // RTDB filtering limitations: can only filter by one key. 'userId' or 'status'.
+          // We'll filter by userId and then filter for status='Open' in memory.
+          const requestsSnap = await get(requestsQuery);
+          const myRequests: ProjectRequest[] = [];
+          if (requestsSnap.exists()) {
+            requestsSnap.forEach(child => {
+              const req = { id: child.key, ...child.val() } as ProjectRequest;
+              if (req.status === 'Open') {
+                myRequests.push(req);
+              }
+            });
+          }
+          setMyOpenRequests(myRequests);
         }
 
       } catch (error) {
@@ -768,252 +754,231 @@ export default function PhotographerDetailPage({ params }: { params: Promise<{ i
     };
 
     fetchData();
-    return () => unsubPortfolio && unsubPortfolio();
 
-  }, [firestore, id, currentUser]);
+  }, [database, id, currentUser]);
+
 
   const handleMessageUser = async () => {
-    if (!currentUser || !userData || !firestore) return;
+    if (!currentUser || !userData || !database) return;
     setIsStartingChat(true);
     router.push(`/messages/new?recipient=${userData.id}`);
   };
 
-  const isFavorited = React.useMemo(() => {
-    return currentUserData?.favoritePhotographerIds?.includes(id) || false;
-  }, [currentUserData, id]);
-
-  const toggleFavorite = async () => {
-    if (!currentUser || !firestore) return;
-    const userRef = doc(firestore, 'users', currentUser.uid);
-    try {
-      if (isFavorited) {
-        await updateDoc(userRef, { favoritePhotographerIds: arrayRemove(id) });
-      } else {
-        await updateDoc(userRef, { favoritePhotographerIds: arrayUnion(id) });
-      }
-    } catch (error) {
-      console.error("Error updating favorites", error);
-      toast({
-        variant: "destructive",
-        title: "Error",
-        description: "Could not update your favorites. Please try again.",
-      });
-    }
-  };
-
-
-  const handlePaymentSuccess = async (bid: any) => {
-    if (!firestore || !userData || !currentUser) return;
-
-    const batch = writeBatch(firestore);
-
-    // Create Project Chat Room
-    const chatRoomRef = doc(collection(firestore, 'chatRooms'));
-    const chatRoomData: ChatRoom = {
-      id: chatRoomRef.id,
-      participantIds: [currentUser.uid, photographerProfile!.userId].sort(),
-      user1Id: currentUser.uid,
-      user2Id: photographerProfile!.userId,
-      isProjectChat: true,
-      lastMessage: null,
-    };
-    batch.set(chatRoomRef, chatRoomData);
-
-    const requestDocRef = doc(firestore, 'requests', bid.requestId); // Assuming bid has requestId
-    const requestUpdateData = {
-      status: 'In Progress' as const,
-      hiredPhotographerId: bid.userId,
-      participantIds: [currentUser.uid, bid.userId],
-      acceptedBidAmount: bid.amount,
-      projectChatRoomId: chatRoomRef.id,
-    };
-    batch.update(requestDocRef, requestUpdateData);
-
-    const photographerUserRef = doc(firestore, 'users', bid.userId);
-    batch.update(photographerUserRef, { unreadGigsCount: increment(1) });
-
-    await batch.commit();
-
-    setIsPaymentDialogOpen(false);
-    setBidToAccept(null);
-    toast({ title: 'Bid Accepted!', description: `You have hired ${bid.bidderUser.name}.` });
-  };
 
   if (isLoading) {
     return (
-      <main className="flex flex-1 items-center justify-center">
+      <div className="container py-8 flex items-center justify-center min-h-[50vh]">
         <Loader className="h-8 w-8 animate-spin" />
-      </main>
+      </div>
     );
   }
 
   if (!userData) {
-    notFound();
+    return (
+      <div className="container py-8 text-center">
+        <h1 className="text-2xl font-bold">User Not Found</h1>
+        <Button className="mt-4" onClick={() => router.push('/photographers')}>Go Back</Button>
+      </div>
+    );
   }
 
-  const isOwnProfile = currentUser?.uid === userData.id;
+  const isPhotographer = userData.role === 'photographer';
+  // Fallback: If no dedicated profile found but user is photographer, show basics using user data
+  const displayName = userData.displayName || userData.email?.split('@')[0] || 'User';
+  const bio = photographerProfile?.bio || userData.bio || "No bio available.";
+  const location = photographerProfile?.location || userData.location || "Location not specified";
+  const rating = 0; // Calculate if needed, but usually derived from reviews in a better way (e.g. aggregate)
+  const reviewCount = allReviews?.length || 0;
+  const averageRating = reviewCount > 0 ? (allReviews!.reduce((acc, curr) => acc + curr.rating, 0) / reviewCount).toFixed(1) : "New";
 
-  const averageRating = allReviews && allReviews.length > 0
-    ? (allReviews.reduce((acc, r) => acc + r.rating, 0) / allReviews.length).toFixed(1)
-    : 0;
-
-  const country = countries.find(c => c.value === photographerProfile?.serviceCountry);
-  const locationParts = [];
-  if (photographerProfile?.areas?.length) {
-    locationParts.push(photographerProfile.areas.join(', '));
-  }
-  if (country) {
-    locationParts.push(country.label);
-  }
-  const locationDisplay = locationParts.join(', ');
-
-  const serviceFee = (bidToAccept?.amount || 0) * 0.10;
-  const totalPayment = (bidToAccept?.amount || 0) + serviceFee;
 
   return (
-    <>
-      {clientSecret && bidToAccept && isPaymentDialogOpen && (
-        <Dialog open={isPaymentDialogOpen} onOpenChange={setIsPaymentDialogOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Complete Payment</DialogTitle>
-              <DialogDescription>
-                You are hiring <span className="font-bold">{bidToAccept.bidderUser?.name}</span>. Please confirm the payment details below.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="py-4 space-y-4">
-              <div className="p-4 rounded-lg bg-muted/50 text-sm">
-                <div className="flex justify-between">
-                  <span>Photographer's Bid</span>
-                  <span>${(bidToAccept.amount).toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Service Fee (10%)</span>
-                  <span>${serviceFee.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between font-bold text-base mt-2 pt-2 border-t">
-                  <span>Total</span>
-                  <span>${totalPayment.toFixed(2)}</span>
-                </div>
+    <div className="min-h-screen bg-background">
+      {/* Hero Section */}
+      <div className="relative h-[300px] w-full bg-slate-900 overflow-hidden">
+        {photographerProfile?.coverPhotoUrl ? (
+          <Image
+            src={photographerProfile.coverPhotoUrl}
+            alt="Cover"
+            fill
+            className="object-cover opacity-60"
+            priority
+          />
+        ) : (
+          <div className="absolute inset-0 bg-gradient-to-r from-blue-900 to-purple-900 opacity-80" />
+        )}
+        <div className="absolute bottom-0 left-0 w-full p-6 bg-gradient-to-t from-black/80 to-transparent pt-20">
+          <div className="container mx-auto flex flex-col md:flex-row items-end gap-6">
+            <Avatar className="h-32 w-32 border-4 border-white shadow-lg">
+              <AvatarImage src={userData.photoURL} alt={displayName} className="object-cover" />
+              <AvatarFallback className="text-4xl">{displayName.charAt(0)}</AvatarFallback>
+            </Avatar>
+            <div className="flex-1 text-white pb-2">
+              <div className="flex items-center gap-2">
+                <h1 className="text-3xl font-bold">{displayName}</h1>
+                {/* {isPhotographer && <Badge variant="secondary" className="bg-blue-500/20 text-blue-100 hover:bg-blue-500/30">Pro Photographer</Badge>} */}
               </div>
-              <Elements stripe={loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!)} options={{ clientSecret, locale: 'en' }}>
-                <CheckoutForm onSuccessfulPayment={() => handlePaymentSuccess(bidToAccept)} />
-              </Elements>
-            </div>
-          </DialogContent>
-        </Dialog>
-      )}
-
-      <main className="flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-8">
-        <div className="mx-auto grid w-full max-w-6xl gap-6">
-          <div className="grid gap-6 md:grid-cols-[1fr_300px]">
-            <div className="flex flex-col gap-6">
-              <Card>
-                <CardContent className="p-6">
-                  <div className="flex flex-col items-center gap-4 text-center md:flex-row md:text-left">
-                    <div className="relative">
-                      <Avatar className="h-24 w-24 border">
-                        {userData.photoURL && <AvatarImage src={userData.photoURL} alt={userData.name} data-ai-hint="person portrait" />}
-                        <AvatarFallback>{userData.name.charAt(0)}</AvatarFallback>
-                      </Avatar>
-                      {userData.showActivityStatus && (
-                        <div className="absolute bottom-1 right-1 h-5 w-5 rounded-full border-2 border-background bg-green-500" title="Online" />
-                      )}
-                    </div>
-                    <div className="grid gap-1 flex-1 min-w-0">
-                      <h1 className="text-2xl font-bold break-all">{userData.name}</h1>
-                      {locationDisplay && (
-                        <div className="flex items-center justify-center gap-2 text-muted-foreground md:justify-start">
-                          <MapPin className="h-4 w-4 flex-shrink-0" />
-                          <div className="break-all">{locationDisplay}</div>
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex w-full flex-col items-stretch gap-2 md:ml-auto md:w-auto md:items-end flex-shrink-0">
-                      {!isOwnProfile && currentUser && (
-                        <>
-                          <div className="flex w-full flex-col gap-2 md:flex-row">
-                            <Button variant="outline" onClick={handleMessageUser} disabled={isStartingChat} className="w-full">
-                              {isStartingChat ? <Loader className="mr-2 h-4 w-4 animate-spin" /> : <MessageSquare className="mr-2 h-4 w-4" />}
-                              Message
-                            </Button>
-                            <Button onClick={() => setIsBookNowOpen(true)} className="w-full">Book Now</Button>
-                          </div>
-                          <div className="flex w-full items-center justify-center gap-2 md:justify-end">
-                            <Button variant="outline" size="icon" onClick={toggleFavorite}>
-                              <Heart className={cn("h-5 w-5", isFavorited && "fill-destructive text-destructive")} />
-                            </Button>
-                            <ReportDialog reportedUserId={userData.id} context={{ type: 'user', id: userData.id }} />
-                          </div>
-                        </>
-                      )}
-                      <BookNowDialog photographer={userData} open={isBookNowOpen} onOpenChange={setIsBookNowOpen} />
-                    </div>
+              <div className="flex items-center gap-4 mt-2 text-slate-200">
+                <div className="flex items-center gap-1">
+                  <MapPin className="h-4 w-4" />
+                  <span>{location}</span>
+                </div>
+                {isPhotographer && (
+                  <div className="flex items-center gap-1">
+                    <Star className="h-4 w-4 text-yellow-400 fill-yellow-400" />
+                    <span className="font-semibold">{averageRating}</span>
+                    <span className="text-sm opacity-80">({reviewCount} reviews)</span>
                   </div>
-                </CardContent>
-              </Card>
-
-              {userData.bio && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle>About {userData.name}</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="whitespace-pre-wrap text-foreground/80 break-all">{userData.bio}</p>
-                  </CardContent>
-                </Card>
-              )}
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Portfolio</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <PortfolioGallery
-                    items={portfolioItems}
-                    setItems={setPortfolioItems}
-                    profileId={photographerProfile?.id || ''}
-                    isOwnProfile={isOwnProfile}
-                    onUploadClick={() => router.push('/profile')}
-                    isLoading={isLoading}
-                  />
-                </CardContent>
-              </Card>
-
+                )}
+              </div>
             </div>
-
-            <div className="flex flex-col gap-6">
-              <Card>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <CardTitle>Reviews</CardTitle>
-                    </div>
-                    {allReviews && allReviews.length > 0 && (
-                      <div className="flex items-center gap-2 text-sm">
-                        <div className="flex items-center gap-1">
-                          <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />
-                          <span className="font-bold">{averageRating}</span>
-                        </div>
-                        <span className="text-muted-foreground">({allReviews.length} reviews)</span>
-                      </div>
-                    )}
-                  </div>
-                </CardHeader>
-                <CardContent className="grid gap-6">
-                  {allReviews && allReviews.length > 0 ? (
-                    allReviews.map(review => (
-                      <DisplayReviewCard key={review.id} review={review} reviewer={reviewers[review.reviewerId]} />
-                    ))
-                  ) : (
-                    <p className="text-sm text-muted-foreground">No reviews yet.</p>
+            <div className="flex gap-3 pb-2">
+              {currentUser && currentUser.uid !== id && (
+                <>
+                  <Button
+                    variant={isFavorite ? "destructive" : "secondary"}
+                    size="icon"
+                    className="rounded-full"
+                    onClick={toggleFavorite}
+                    title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                  >
+                    <Heart className={cn("h-5 w-5", isFavorite && "fill-current")} />
+                  </Button>
+                  <Button variant="secondary" className="gap-2" onClick={handleMessageUser}>
+                    <MessageSquare className="h-4 w-4" />
+                    Message
+                  </Button>
+                  {isPhotographer && (
+                    <Button className="gap-2" onClick={() => setIsBookNowOpen(true)}>
+                      Book Now
+                    </Button>
                   )}
-                </CardContent>
-              </Card>
+                </>
+              )}
             </div>
           </div>
         </div>
-      </main>
-    </>
+      </div>
+
+      <div className="container mx-auto py-8 px-4 grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Left Column: Info & Portfolio */}
+        <div className="lg:col-span-2 space-y-8">
+          {/* About */}
+          <section>
+            <h2 className="text-xl font-bold mb-4">About</h2>
+            <Card>
+              <CardContent className="pt-6">
+                <p className="whitespace-pre-wrap leading-relaxed text-muted-foreground">
+                  {bio}
+                </p>
+                {photographerProfile?.equipment && (
+                  <div className="mt-6">
+                    <h3 className="font-semibold mb-2">Equipment</h3>
+                    <div className="flex flex-wrap gap-2">
+                      {photographerProfile.equipment.map((item, i) => (
+                        <Badge key={i} variant="outline" className="px-3 py-1">{item}</Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {photographerProfile?.specialties && (
+                  <div className="mt-6">
+                    <h3 className="font-semibold mb-2">Specialties</h3>
+                    <div className="flex flex-wrap gap-2">
+                      {photographerProfile.specialties.map((item, i) => (
+                        <Badge key={i} variant="secondary" className="px-3 py-1">{item}</Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </section>
+
+          {/* Portfolio */}
+          {isPhotographer && (
+            <section>
+              <h2 className="text-xl font-bold mb-4">Portfolio</h2>
+              {portfolioItems.length > 0 ? (
+                <PortfolioGallery
+                  items={portfolioItems}
+                  setItems={setPortfolioItems}
+                  profileId={photographerProfile?.id || ''}
+                  isOwnProfile={false} // Or check if current user matches
+                  onUploadClick={() => { }}
+                  isLoading={false}
+                />
+              ) : (
+                <Card>
+                  <CardContent className="py-12 text-center text-muted-foreground">
+                    This photographer hasn't uploaded any portfolio items yet.
+                  </CardContent>
+                </Card>
+              )}
+            </section>
+          )}
+
+          {/* Reviews */}
+          <section>
+            <h2 className="text-xl font-bold mb-4">Reviews</h2>
+            <div className="space-y-4">
+              {allReviews && allReviews.length > 0 ? (
+                allReviews.map((review) => (
+                  <Card key={review.id}>
+                    <CardContent className="pt-6">
+                      <DisplayReviewCard review={review} reviewer={reviewers[review.reviewerId]} />
+                    </CardContent>
+                  </Card>
+                ))
+              ) : (
+                <Card>
+                  <CardContent className="py-8 text-center text-muted-foreground">
+                    No reviews yet.
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          </section>
+        </div>
+
+        {/* Right Column: Sidebar (Pricing / Availability / etc) */}
+        <div className="space-y-6">
+          {isPhotographer && photographerProfile && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Rates & Availability</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex justify-between items-center py-2 border-b">
+                  <span className="text-muted-foreground">Hourly Rate</span>
+                  <span className="font-semibold text-lg">
+                    {photographerProfile.hourlyRate ? `$${photographerProfile.hourlyRate}/hr` : 'Contact for rates'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center py-2 border-b">
+                  <span className="text-muted-foreground">Availability</span>
+                  <span className="font-medium flex items-center gap-2">
+                    <div className={`h-2 w-2 rounded-full ${userData.isAvailable !== false ? 'bg-green-500' : 'bg-red-500'}`} />
+                    {userData.isAvailable !== false ? 'Available' : 'Unavailable'}
+                  </span>
+                </div>
+                {/* Could add calendar or more details here */}
+                <Button className="w-full mt-4" onClick={() => setIsBookNowOpen(true)}>Book Now</Button>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Contact / Socials if public */}
+        </div>
+      </div>
+
+      {userData && (
+        <BookNowDialog
+          photographer={userData}
+          open={isBookNowOpen}
+          onOpenChange={setIsBookNowOpen}
+        />
+      )}
+    </div>
   );
 }

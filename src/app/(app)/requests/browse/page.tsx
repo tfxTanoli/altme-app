@@ -17,14 +17,14 @@ import { Input } from '@/components/ui/input';
 import RequestCard from '@/components/requests/request-card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { countries } from '@/lib/countries';
-import { useFirestore, errorEmitter, FirestorePermissionError } from '@/firebase';
-import { collection, query, where, and, or, getDocs } from 'firebase/firestore';
+import { useDatabase } from '@/firebase';
+import { ref, query, orderByChild, equalTo, get } from 'firebase/database';
 import type { ProjectRequest } from '@/lib/types';
 import { useSearchParams } from 'next/navigation';
 
 
 export default function BrowseRequestsPage() {
-  const firestore = useFirestore();
+  const database = useDatabase();
   const searchParams = useSearchParams();
   const initialQuery = searchParams.get('q') || '';
   const initialCountry = searchParams.get('country') || 'all';
@@ -36,56 +36,53 @@ export default function BrowseRequestsPage() {
 
 
   React.useEffect(() => {
-    if (!firestore) return;
+    if (!database) return;
 
     const fetchRequests = async () => {
       setIsLoading(true);
       try {
-        const filters = [where('status', '==', 'Open')];
+        // Query requests with status 'Open'
+        const requestsRef = ref(database, 'requests');
+        const openRequestsQuery = query(requestsRef, orderByChild('status'), equalTo('Open'));
 
-        if (selectedCountry && selectedCountry !== 'all') {
-          filters.push(where('country', '==', selectedCountry));
+        const snapshot = await get(openRequestsQuery);
+
+        if (snapshot.exists()) {
+          const requestsData: ProjectRequest[] = [];
+          snapshot.forEach((childSnapshot) => {
+            requestsData.push({ id: childSnapshot.key, ...childSnapshot.val() } as ProjectRequest);
+          });
+          setAllOpenRequests(requestsData);
+        } else {
+          setAllOpenRequests([]);
         }
-        const requestsQuery = query(collection(firestore, 'requests'), ...filters);
-
-        // This now includes our improved error handling
-        const snapshot = await getDocs(requestsQuery).catch(err => {
-          errorEmitter.emit('permission-error', new FirestorePermissionError({
-            path: 'requests',
-            operation: 'list',
-          }));
-          // It's important to re-throw or handle the error appropriately
-          // so subsequent code doesn't run assuming success.
-          throw err;
-        });
-
-        const requestsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ProjectRequest));
-        setAllOpenRequests(requestsData);
 
       } catch (error) {
-        // FirestorePermissionError is already emitted, so we just need to avoid crashing here
-        // if it's not our custom error, we can log it.
-        if (!(error instanceof FirestorePermissionError)) {
-          console.error("Error fetching requests:", error);
-        }
+        console.error("Error fetching requests:", error);
         setAllOpenRequests([]);
       } finally {
         setIsLoading(false);
       }
     }
     fetchRequests();
-  }, [firestore, selectedCountry]);
+  }, [database]); // Removed selectedCountry from dependency as filtering is now done client-side if needed, or we filter the result below
 
   const filteredRequests = React.useMemo(() => {
     if (!allOpenRequests) return [];
 
     return allOpenRequests.filter(request => {
-      return searchQuery
+      const matchesSearch = searchQuery
         ? request.title.toLowerCase().includes(searchQuery.toLowerCase())
         : true;
+
+      const matchesCountry = selectedCountry && selectedCountry !== 'all'
+        ? request.country === selectedCountry
+        : true;
+
+      return matchesSearch && matchesCountry;
     });
 
-  }, [allOpenRequests, searchQuery]);
+  }, [allOpenRequests, searchQuery, selectedCountry]);
 
 
   return (

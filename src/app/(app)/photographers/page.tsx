@@ -1,9 +1,7 @@
-
 'use client';
 
 import * as React from 'react';
-import { useFirestore, useFirebase } from '@/firebase';
-import { collection, query, where, getDocs, limit, doc, getDoc, orderBy } from 'firebase/firestore';
+import { useDatabase } from '@/firebase';
 import { ref, query as rtdbQuery, orderByChild, equalTo, get } from 'firebase/database';
 import type { User, PhotographerProfile, Review, PortfolioItem } from '@/lib/types';
 import { Loader, Search, ListFilter, Star } from 'lucide-react';
@@ -28,8 +26,7 @@ type EnrichedPhotographer = User & {
 };
 
 export default function PhotographersPage() {
-  const firestore = useFirestore();
-  const { database } = useFirebase();
+  const database = useDatabase();
   const searchParams = useSearchParams();
   const initialQuery = searchParams.get('q') || '';
   const initialCountry = searchParams.get('country') || 'all';
@@ -42,63 +39,83 @@ export default function PhotographersPage() {
 
   React.useEffect(() => {
     const fetchAndEnrichPhotographers = async () => {
-      if (!database || !firestore) return;
+      if (!database) return;
       setIsLoading(true);
 
       try {
-        // 1. Fetch data from RTDB (Profiles & Users) and Firestore (Reviews) in parallel
+        // 1. Fetch Profiles first (to know which users to fetch)
         const profilesRef = rtdbQuery(ref(database, 'photographerProfiles'), orderByChild('isAcceptingRequests'), equalTo(true));
-        const usersRef = ref(database, 'users');
-        const reviewsQuery = query(collection(firestore, 'reviews')); // Reviews are still in Firestore
 
-        const [profilesSnap, usersSnap, reviewsSnap] = await Promise.all([
+        // Fetch reviews in parallel (assuming reviews are readable as per rules)
+        // Note: For scalability, we should ideally query reviews per photographer or use a cloud function, 
+        // but fetching all reviews is acceptable for smaller datasets if rules allow ".read": true
+        const reviewsRef = ref(database, 'reviews');
+
+        const [profilesSnap, reviewsSnap] = await Promise.all([
           get(profilesRef),
-          get(usersRef),
-          getDocs(reviewsQuery)
+          get(reviewsRef)
         ]);
 
         // Process RTDB Profiles
         const profiles: PhotographerProfile[] = [];
+        const userIds = new Set<string>();
+
         if (profilesSnap.exists()) {
           profilesSnap.forEach(childSnap => {
-            profiles.push({ id: childSnap.key, ...childSnap.val() } as PhotographerProfile);
-          });
-        }
-
-        // Process RTDB Users
-        const usersMap = new Map<string, User>();
-        if (usersSnap.exists()) {
-          usersSnap.forEach(childSnap => {
-            const userData = childSnap.val();
-            if (userData.status !== 'deleted') {
-              usersMap.set(childSnap.key as string, { id: childSnap.key, ...userData } as User);
+            const profile = { id: childSnap.key, ...childSnap.val() } as PhotographerProfile;
+            profiles.push(profile);
+            if (profile.userId) {
+              userIds.add(profile.userId);
             }
           });
         }
 
-        // Process Firestore Reviews
-        const reviewsByReviewee = new Map<string, Review[]>();
-        reviewsSnap.forEach(doc => {
-          const review = doc.data() as Review;
-          if (!reviewsByReviewee.has(review.revieweeId)) {
-            reviewsByReviewee.set(review.revieweeId, []);
+        // 2. Fetch ONLY the Users we need (respects "users/$uid" rule)
+        const usersMap = new Map<string, User>();
+        await Promise.all(Array.from(userIds).map(async (uid) => {
+          try {
+            const userSnap = await get(ref(database, `users/${uid}`));
+            if (userSnap.exists()) {
+              const userData = userSnap.val();
+              if (userData.status !== 'deleted') {
+                usersMap.set(uid, { id: uid, ...userData } as User);
+              }
+            }
+          } catch (err) {
+            console.warn(`Failed to fetch user ${uid}:`, err);
           }
-          reviewsByReviewee.get(review.revieweeId)!.push(review);
-        });
+        }));
 
-        // 2. Fetch portfolio items for all profiles (from RTDB now)
-        // Note: Since we have the profile object from RTDB, portfolioItems might already be nested if fetched in one go,
-        // but usually valid RTDB structure keeps them separate or nested. 
-        // Based on previous code: `photographerProfiles/profileId/portfolioItems`
-        // Let's check if they came with the profile fetch. In RTDB they often do if we fetch the parent node.
+        // Process RTDB Reviews
+        const reviewsByReviewee = new Map<string, Review[]>();
+        if (reviewsSnap.exists()) {
+          reviewsSnap.forEach(childSnap => {
+            const review = childSnap.val() as Review;
+            if (!reviewsByReviewee.has(review.revieweeId)) {
+              reviewsByReviewee.set(review.revieweeId, []);
+            }
+            reviewsByReviewee.get(review.revieweeId)!.push(review);
+          });
+        }
 
-        // Re-map profiles to check for nested portfolioItems or fetch them if needed.
-        // If the `photographerProfiles` structure has `portfolioItems` as a child node, `profilesSnap` already includes them!
-        // Let's assume they are present in the profile object if nested.
-        // However, we need to map them to an array.
-
+        // 3. Enrich data
         const enrichedData = profiles.map(profile => {
-          const user = usersMap.get(profile.userId);
+          let user = usersMap.get(profile.userId);
+
+          // Fallback for guests
+          if (!user && profile.name) {
+            user = {
+              id: profile.userId,
+              name: profile.name || 'Unknown Photographer',
+              photoURL: profile.photoURL,
+              role: 'photographer',
+              status: 'active',
+              email: '',
+              balance: 0,
+            } as User;
+          }
+
+          // Only show profile if user data was successfully fetched or fell back
           if (!user) return null;
 
           const userReviews = reviewsByReviewee.get(profile.userId) || [];
@@ -139,9 +156,6 @@ export default function PhotographersPage() {
         }).filter((p): p is EnrichedPhotographer => p !== null);
 
         setAllPhotographers(enrichedData);
-        console.log("Fetched Profiles:", profiles.length);
-        console.log("Fetched Users:", usersMap.size);
-        console.log("Enriched Photographers:", enrichedData.length);
 
       } catch (error) {
         console.error("Error fetching photographers:", error);
@@ -152,13 +166,12 @@ export default function PhotographersPage() {
     };
 
     fetchAndEnrichPhotographers();
-  }, [database, firestore]);
-
+  }, [database]);
 
   const filteredPhotographers = React.useMemo(() => {
     return allPhotographers.filter(p => {
       const matchesCountry = selectedCountry === 'all' || p.profile?.serviceCountry === selectedCountry;
-      const matchesSearch = !searchQuery || p.name.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesSearch = !searchQuery || (p.name && p.name.toLowerCase().includes(searchQuery.toLowerCase()));
       const matchesRating = selectedRating === 0 || p.averageRating >= selectedRating;
       return matchesCountry && matchesSearch && matchesRating;
     });

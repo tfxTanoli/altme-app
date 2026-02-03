@@ -93,13 +93,13 @@ const PhotographerCard = React.memo(({
                 </CardContent>
                 <CardHeader className="flex-row items-center gap-4 pt-2 p-4 flex-1">
                     <Avatar className="h-12 w-12 border">
-                        <AvatarImage src={photographerUser.photoURL} alt={photographerUser.name} data-ai-hint="person portrait" />
-                        <AvatarFallback>{photographerUser.name.charAt(0)}</AvatarFallback>
+                        <AvatarImage src={photographerUser.photoURL} alt={photographerUser.name || 'Photographer'} data-ai-hint="person portrait" />
+                        <AvatarFallback>{(photographerUser.name || '?').charAt(0)}</AvatarFallback>
                     </Avatar>
                     <div className="flex-1 overflow-hidden">
                         <div className="flex justify-between items-start">
                             <CardTitle className="text-lg truncate pr-2">
-                                {photographerUser.name}
+                                {photographerUser.name || 'Unknown Photographer'}
                             </CardTitle>
                             <Button
                                 variant="ghost"

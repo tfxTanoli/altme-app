@@ -27,9 +27,8 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table';
-import { useFirestore, errorEmitter, FirestorePermissionError, useUser, useDatabase } from '@/firebase';
-import { collection, query, limit, orderBy, where, getDocs, Timestamp } from 'firebase/firestore';
-import { ref, get, child } from 'firebase/database';
+import { useUser, useDatabase } from '@/firebase';
+import { ref, get, child, query, orderByChild, equalTo } from 'firebase/database';
 import type { User as AppUser, ProjectRequest, EscrowPayment } from '@/lib/types';
 import { Loader } from 'lucide-react';
 import { useEffect, useState, useMemo } from 'react';
@@ -37,7 +36,6 @@ import { useEffect, useState, useMemo } from 'react';
 const PLATFORM_FEE_PERCENTAGE = 0.15; // 15%
 
 export default function AdminDashboard() {
-    const firestore = useFirestore();
     const database = useDatabase();
     const { user: currentUser } = useUser();
     const [allUsers, setAllUsers] = useState<AppUser[]>([]);
@@ -46,17 +44,19 @@ export default function AdminDashboard() {
     const [isLoading, setIsLoading] = useState(true);
 
     useEffect(() => {
-        // Wait for firestore and user to be available
-        if (!firestore || !currentUser) return;
+        // Wait for database and user to be available
+        if (!database || !currentUser) return;
 
         const fetchData = async () => {
             setIsLoading(true);
             try {
                 // Parallel fetch: Check admin role and fetch users simultaneously
                 const dbRef = ref(database);
-                const [adminSnapshot, usersSnapshot] = await Promise.all([
+                const [adminSnapshot, usersSnapshot, projectsSnapshot, paymentsSnapshot] = await Promise.all([
                     get(child(dbRef, `users/${currentUser.uid}`)),
-                    get(ref(database, 'users'))
+                    get(ref(database, 'users')),
+                    get(ref(database, 'requests')),
+                    get(query(ref(database, 'escrowPayments'), orderByChild('status'), equalTo('released')))
                 ]);
 
                 const userData = adminSnapshot.val();
@@ -74,40 +74,66 @@ export default function AdminDashboard() {
                         ...data[key]
                     })) as AppUser[];
                     usersArray.sort((a, b) => {
-                        const timeA = a.joinDate ? (typeof a.joinDate === 'object' && 'seconds' in a.joinDate ? a.joinDate.seconds * 1000 : new Date(a.joinDate).getTime()) : 0;
-                        const timeB = b.joinDate ? (typeof b.joinDate === 'object' && 'seconds' in b.joinDate ? b.joinDate.seconds * 1000 : new Date(b.joinDate).getTime()) : 0;
-                        return timeB - timeA;
+                        // Simplify parsing: check if joinDate is string or number or object
+                        // RTDB usually stores ISO strings or timestamps.
+                        const getDate = (d: any) => {
+                            if (!d) return 0;
+                            if (d instanceof Date) return d.getTime();
+                            if (typeof d === 'number') return d; // Timestamp
+                            if (typeof d === 'object' && 'seconds' in d) return d.seconds * 1000; // Firestore Timestamp relic
+                            return new Date(d).getTime();
+                        };
+                        return getDate(b.joinDate) - getDate(a.joinDate);
                     });
                     setAllUsers(usersArray);
                 } else {
                     setAllUsers([]);
                 }
 
-                // Parallel Firestore queries
-                const projectsQuery = query(collection(firestore, 'requests'), orderBy('createdAt', 'desc'));
-                const releasedPaymentsQuery = query(collection(firestore, 'escrowPayments'), where('status', '==', 'released'));
+                // Process projects
+                if (projectsSnapshot.exists()) {
+                    const data = projectsSnapshot.val();
+                    const projectsArray = Object.keys(data).map(key => ({
+                        id: key,
+                        ...data[key]
+                    })) as ProjectRequest[];
 
-                const [
-                    projectsSnap,
-                    paymentsSnap
-                ] = await Promise.all([
-                    getDocs(projectsQuery).catch(err => { errorEmitter.emit('permission-error', new FirestorePermissionError({ path: 'requests', operation: 'list' })); throw err; }),
-                    getDocs(releasedPaymentsQuery).catch(err => { errorEmitter.emit('permission-error', new FirestorePermissionError({ path: 'escrowPayments', operation: 'list' })); throw err; }),
-                ]);
-
-                setAllProjects(projectsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as ProjectRequest)));
-                setReleasedPayments(paymentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as EscrowPayment)));
-            } catch (error) {
-                if (!(error instanceof FirestorePermissionError)) {
-                    console.error("Error fetching admin dashboard data:", error);
+                    projectsArray.sort((a, b) => {
+                        const getDate = (d: any) => {
+                            if (!d) return 0;
+                            if (d instanceof Date) return d.getTime();
+                            if (typeof d === 'number') return d;
+                            if (typeof d === 'object' && d.seconds) return d.seconds * 1000;
+                            return new Date(d).getTime();
+                        };
+                        return getDate(b.createdAt) - getDate(a.createdAt);
+                    });
+                    setAllProjects(projectsArray);
+                } else {
+                    setAllProjects([]);
                 }
+
+                // Process payments
+                if (paymentsSnapshot.exists()) {
+                    const data = paymentsSnapshot.val();
+                    const paymentsArray: EscrowPayment[] = [];
+                    paymentsSnapshot.forEach((child) => {
+                        paymentsArray.push({ id: child.key, ...child.val() } as EscrowPayment);
+                    });
+                    setReleasedPayments(paymentsArray);
+                } else {
+                    setReleasedPayments([]);
+                }
+
+            } catch (error) {
+                console.error("Error fetching admin dashboard data:", error);
             } finally {
                 setIsLoading(false);
             }
         }
 
         fetchData();
-    }, [firestore, database, currentUser]);
+    }, [database, currentUser]);
 
     const recentUsers = useMemo(() => allUsers.slice(0, 5), [allUsers]);
     const recentProjects = useMemo(() => allProjects.slice(0, 5), [allProjects]);
@@ -124,9 +150,14 @@ export default function AdminDashboard() {
 
         return generalUsers.filter(user => {
             if (user.joinDate) {
-                const joinTime = typeof user.joinDate === 'object' && 'seconds' in user.joinDate
-                    ? user.joinDate.seconds * 1000
-                    : new Date(user.joinDate).getTime();
+                const getDate = (d: any) => {
+                    if (!d) return 0;
+                    if (d instanceof Date) return d.getTime();
+                    if (typeof d === 'number') return d;
+                    if (typeof d === 'object' && 'seconds' in d) return d.seconds * 1000;
+                    return new Date(d).getTime();
+                };
+                const joinTime = getDate(user.joinDate);
                 return joinTime >= startOfMonth.getTime();
             }
             return false;
@@ -138,8 +169,15 @@ export default function AdminDashboard() {
         const oneWeekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
 
         return allProjects.filter(project => {
-            if (project.createdAt && project.createdAt instanceof Timestamp) {
-                return project.createdAt.toDate() >= oneWeekAgo;
+            if (project.createdAt) {
+                const getDate = (d: any) => {
+                    if (!d) return 0;
+                    if (d instanceof Date) return d.getTime();
+                    if (typeof d === 'number') return d;
+                    if (typeof d === 'object' && d.seconds) return d.seconds * 1000;
+                    return new Date(d).getTime();
+                };
+                return getDate(project.createdAt) >= oneWeekAgo.getTime();
             }
             return false;
         }).length;

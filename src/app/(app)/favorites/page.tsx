@@ -1,10 +1,8 @@
-
 'use client';
 
 import * as React from 'react';
-import { useFirestore, useUser, errorEmitter, FirestorePermissionError } from '@/firebase';
-import { collection, query, where, getDocs, onSnapshot, doc, limit, orderBy } from 'firebase/firestore';
-import { getDatabase, ref, get, query as rtdbQuery, orderByChild, equalTo } from 'firebase/database';
+import { useUser, useDatabase } from '@/firebase';
+import { ref, get, onValue, query, orderByChild, equalTo } from 'firebase/database';
 import type { User, PhotographerProfile, Review, PortfolioItem, ProjectRequest } from '@/lib/types';
 import { Loader, Heart } from 'lucide-react';
 import PhotographerCard from '@/components/photographers/photographer-card';
@@ -19,186 +17,139 @@ type EnrichedPhotographer = User & {
     reviewCount: number;
 };
 
-function splitIntoChunks<T>(array: T[], size: number): T[][] {
-    const chunks: T[][] = [];
-    for (let i = 0; i < array.length; i += size) {
-        chunks.push(array.slice(i, i + size));
-    }
-    return chunks;
-}
-
-
+// Helper to batch generic array processing if needed (though RTDB usually handles parallel gets ok)
+// We will just use Promise.all
 export default function FavoritesPage() {
-    const firestore = useFirestore();
-    const { user: currentUser, isUserLoading } = useUser();
+    const database = useDatabase();
+    const { user: currentUser } = useUser();
 
     const [favoritedPhotographers, setFavoritedPhotographers] = React.useState<EnrichedPhotographer[]>([]);
     const [favoritedRequests, setFavoritedRequests] = React.useState<ProjectRequest[]>([]);
     const [isLoading, setIsLoading] = React.useState(true);
 
-    const fetchFavorites = React.useCallback(async (photographerIds: string[], requestIds: string[]) => {
-        if (!firestore) return;
-        setIsLoading(true);
+    React.useEffect(() => {
+        if (!currentUser || !database) {
+            if (!currentUser && !isLoading) {
+                setFavoritedPhotographers([]);
+                setFavoritedRequests([]);
+                setIsLoading(false);
+            }
+            return;
+        }
 
-        try {
-            // Fetch photographers
-            if (photographerIds.length > 0) {
-                const idChunks = splitIntoChunks(photographerIds, 30);
-                const database = getDatabase();
+        const userRef = ref(database, `users/${currentUser.uid}`);
 
-                const photographerPromises = idChunks.map(async (chunk) => {
-                    console.log("Processing chunk of IDs:", chunk);
-                    // Fetch Profiles from RTDB by userId
-                    // Since profiles are keyed by a Push ID but we have the User ID (from favorites),
-                    // we need to query for the profile where userId matches.
-                    const profilePromises = chunk.map(id => {
-                        const profilesRef = rtdbQuery(ref(database, 'photographerProfiles'), orderByChild('userId'), equalTo(id));
-                        return get(profilesRef);
-                    });
+        const unsubscribe = onValue(userRef, async (snapshot) => {
+            if (!snapshot.exists()) {
+                setIsLoading(false);
+                setFavoritedPhotographers([]);
+                setFavoritedRequests([]);
+                return;
+            }
 
-                    const userPromises = chunk.map(id => get(ref(database, `users/${id}`)));
-                    const reviewsQuery = query(collection(firestore, 'reviews'), where('revieweeId', 'in', chunk));
+            const userData = snapshot.val();
+            // Handle array or map structure
+            const favoritePhotographerIds: string[] = Array.isArray(userData.favoritePhotographerIds)
+                ? userData.favoritePhotographerIds
+                : userData.favoritePhotographerIds ? Object.keys(userData.favoritePhotographerIds) : [];
 
-                    const [profileSnaps, userSnaps, reviewsSnap] = await Promise.all([
-                        Promise.all(profilePromises),
-                        Promise.all(userPromises),
-                        getDocs(reviewsQuery)
-                    ]);
+            const favoriteRequestIds: string[] = Array.isArray(userData.favoriteRequestIds)
+                ? userData.favoriteRequestIds
+                : userData.favoriteRequestIds ? Object.keys(userData.favoriteRequestIds) : [];
 
-                    const usersMap = new Map();
-                    userSnaps.forEach(snap => {
-                        console.log(`User snap for ${snap.key}: exists=${snap.exists()}`);
-                        if (snap.exists()) usersMap.set(snap.key, { id: snap.key, ...snap.val() });
-                    });
+            // Fetch Photographers
+            if (favoritePhotographerIds.length > 0) {
+                const enriched: EnrichedPhotographer[] = [];
+                await Promise.all(favoritePhotographerIds.map(async (uid) => {
+                    try {
+                        const userSnap = await get(ref(database, `users/${uid}`));
+                        if (!userSnap.exists()) return;
 
-                    const profilesMap = new Map();
-                    profileSnaps.forEach((snap, index) => {
-                        // fetch is by query, so snap is a map of matches.
-                        // Since userId is unique per profile usually (1:1), we take the first.
-                        const requestedUserId = chunk[index];
-                        if (snap.exists()) {
-                            const data = snap.val();
-                            const profileId = Object.keys(data)[0];
-                            // Add the ID to the object
-                            profilesMap.set(requestedUserId, { id: profileId, ...data[profileId] });
-                        } else {
-                            console.log(`No profile found for user ${requestedUserId}`);
-                        }
-                    });
+                        const user = { id: uid, ...userSnap.val() } as User;
 
-                    const reviewsMap = new Map<string, Review[]>();
-                    reviewsSnap.forEach(d => {
-                        const review = d.data() as Review;
-                        if (!reviewsMap.has(review.revieweeId)) reviewsMap.set(review.revieweeId, []);
-                        reviewsMap.get(review.revieweeId)!.push(review);
-                    });
+                        // Fetch Profile
+                        const profilesQuery = query(ref(database, 'photographerProfiles'), orderByChild('userId'), equalTo(uid));
+                        const profileSnap = await get(profilesQuery);
+                        let profile: PhotographerProfile | null = null;
+                        let portfolioItems: PortfolioItem[] = [];
 
-                    const enriched: EnrichedPhotographer[] = [];
+                        if (profileSnap.exists()) {
+                            const pData = profileSnap.val();
+                            const pid = Object.keys(pData)[0];
+                            const rawProfile = pData[pid];
+                            profile = { id: pid, ...rawProfile };
 
-                    for (const userId of chunk) {
-                        const user = usersMap.get(userId);
-                        const profile = profilesMap.get(userId);
-
-                        if (user && profile) {
-                            const userReviews = reviewsMap.get(userId) || [];
-                            const averageRating = userReviews.length > 0 ? userReviews.reduce((acc, r) => acc + r.rating, 0) / userReviews.length : 0;
-
-                            let portfolioItems: PortfolioItem[] = [];
-                            if (profile.portfolioItems) {
+                            if (rawProfile.portfolioItems) {
                                 // @ts-ignore
-                                portfolioItems = Object.entries(profile.portfolioItems).map(([key, value]: [string, any]) => ({
-                                    id: key,
-                                    ...value
-                                }));
-                                // Sort by createdAt desc if possible
-                                portfolioItems.sort((a: any, b: any) => {
-                                    const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (Number(a.createdAt) || 0);
-                                    const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (Number(b.createdAt) || 0);
-                                    return timeB - timeA;
+                                portfolioItems = Object.entries(rawProfile.portfolioItems).map(([k, v]: [string, any]) => ({ id: k, ...v }));
+                                // Sort by createdAt desc
+                                portfolioItems.sort((a, b) => {
+                                    // Handle timestamp if string or number
+                                    const tA = typeof a.createdAt === 'number' ? a.createdAt : 0;
+                                    const tB = typeof b.createdAt === 'number' ? b.createdAt : 0;
+                                    return tB - tA;
                                 });
                             }
+                        }
 
+                        // Fetch reviews for rating
+                        const reviewsQuery = query(ref(database, 'reviews'), orderByChild('revieweeId'), equalTo(uid));
+                        const reviewsSnap = await get(reviewsQuery);
+                        let totalRating = 0;
+                        let count = 0;
+                        if (reviewsSnap.exists()) {
+                            reviewsSnap.forEach(c => {
+                                totalRating += c.val().rating;
+                                count++;
+                            });
+                        }
+                        const averageRating = count > 0 ? totalRating / count : 0;
+
+                        if (profile) {
                             enriched.push({
                                 ...user,
                                 profile,
                                 portfolioItems,
                                 averageRating,
-                                reviewCount: userReviews.length,
+                                reviewCount: count
                             });
-                        } else {
-                            console.warn(`Missing data for ${userId}: User=${!!user}, Profile=${!!profile}`);
                         }
+                    } catch (e) {
+                        console.error(`Error fetching favored photographer ${uid}`, e);
                     }
-                    return enriched;
-                });
-                // Await all chunk promises and flatten the result
-                const results = (await Promise.all(photographerPromises)).flat();
-                console.log("Final favorited photographers:", results);
-                setFavoritedPhotographers(results);
+                }));
+                setFavoritedPhotographers(enriched);
             } else {
                 setFavoritedPhotographers([]);
             }
 
-            // Fetch requests
-            if (requestIds.length > 0) {
+            // Fetch Requests
+            if (favoriteRequestIds.length > 0) {
                 const requests: ProjectRequest[] = [];
-                const idChunks = splitIntoChunks(requestIds, 30);
-                for (const chunk of idChunks) {
-                    if (chunk.length === 0) continue;
-                    const requestsQuery = query(collection(firestore, 'requests'), where('__name__', 'in', chunk));
-                    const snapshot = await getDocs(requestsQuery);
-                    snapshot.forEach(doc => requests.push({ id: doc.id, ...doc.data() } as ProjectRequest));
-                }
+                await Promise.all(favoriteRequestIds.map(async (rid) => {
+                    try {
+                        const rSnap = await get(ref(database, `requests/${rid}`));
+                        if (rSnap.exists()) {
+                            requests.push({ id: rid, ...rSnap.val() } as ProjectRequest);
+                        }
+                    } catch (e) {
+                        console.error(`Error fetching favored request ${rid}`, e);
+                    }
+                }));
                 setFavoritedRequests(requests);
             } else {
                 setFavoritedRequests([]);
             }
-        } catch (error) {
-            console.error("Error fetching favorites:", error);
-            errorEmitter.emit('permission-error', new FirestorePermissionError({
-                path: 'users/photographerProfiles/reviews/requests',
-                operation: 'list'
-            }));
-        } finally {
-            setIsLoading(false);
-        }
-    }, [firestore]);
 
-    React.useEffect(() => {
-        if (isUserLoading || !firestore) {
-            return;
-        }
-        if (!currentUser) {
             setIsLoading(false);
-            setFavoritedPhotographers([]);
-            setFavoritedRequests([]);
-            return;
-        }
 
-        const userDocRef = doc(firestore, 'users', currentUser.uid);
-        const unsubscribe = onSnapshot(userDocRef, (userDoc) => {
-            if (userDoc.exists()) {
-                const userData = userDoc.data() as User;
-                const photographerIds = userData.favoritePhotographerIds || [];
-                const requestIds = userData.favoriteRequestIds || [];
-                fetchFavorites(photographerIds, requestIds);
-            } else {
-                setIsLoading(false);
-                setFavoritedPhotographers([]);
-                setFavoritedRequests([]);
-            }
-        },
-            (error) => {
-                console.error('Error listening to user favorites:', error);
-                errorEmitter.emit('permission-error', new FirestorePermissionError({
-                    path: `users/${currentUser.uid}`,
-                    operation: 'get',
-                }));
-                setIsLoading(false);
-            });
+        }, (error) => {
+            console.error("Error listening to favorites:", error);
+            setIsLoading(false);
+        });
 
         return () => unsubscribe();
-    }, [currentUser, firestore, isUserLoading, fetchFavorites]);
+    }, [currentUser, database]);
 
     const renderEmptyState = (title: string, description: string) => (
         <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed shadow-sm h-64">

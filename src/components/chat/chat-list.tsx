@@ -8,8 +8,8 @@ import { formatDistanceToNow } from 'date-fns';
 import { cn } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
 import type { ChatRoom, User } from '@/lib/types';
-import { useFirestore } from '@/firebase';
-import { collection, query, where, getDocs, limit } from 'firebase/firestore';
+import { useDatabase } from '@/firebase';
+import { ref, query, orderByChild, equalTo, limitToFirst, get } from 'firebase/database';
 import { Button } from '@/components/ui/button';
 import { useRouter } from 'next/navigation';
 
@@ -53,7 +53,7 @@ const ChatListItem = ({ chatRoom, partner, isActive }: ChatListItemProps) => {
                              */}
                             <p className="text-xs text-muted-foreground">
                                 {chatRoom.lastMessage?.timestamp
-                                    ? formatDistanceToNow(chatRoom.lastMessage.timestamp.toDate(), { addSuffix: true })
+                                    ? formatDistanceToNow(new Date(chatRoom.lastMessage.timestamp), { addSuffix: true })
                                     : ''}
                             </p>
                         </div>
@@ -80,7 +80,7 @@ export const ChatList = ({ chatRooms, usersMap, activeChatRoomId, currentUserId 
     const [searchQuery, setSearchQuery] = React.useState('');
     const [photographers, setPhotographers] = React.useState<User[]>([]);
     const [showPhotographers, setShowPhotographers] = React.useState(false);
-    const firestore = useFirestore();
+    const database = useDatabase();
     const router = useRouter();
 
     const filteredChatRooms = React.useMemo(() => {
@@ -95,31 +95,53 @@ export const ChatList = ({ chatRooms, usersMap, activeChatRoomId, currentUserId 
 
     // Fetch photographers when needing to search for new people
     React.useEffect(() => {
-        if (!firestore) return;
+        if (!database) return;
 
         const fetchPhotographers = async () => {
             try {
-                // Fetch users who are photographers
-                // Note: Indexing might be required for complex queries.
-                // For now, let's just get some photographers.
-                // If the user base is large, this should be paginated or search-optimized (Algolia/Meili).
-                const q = query(
-                    collection(firestore, 'users'),
-                    where('role', '==', 'photographer'),
-                    limit(50)
+                // 1. Fetch Profiles first (allowed by rules)
+                const profilesRef = query(
+                    ref(database, 'photographerProfiles'),
+                    orderByChild('isAcceptingRequests'),
+                    equalTo(true),
+                    limitToFirst(50)
                 );
 
-                const snapshot = await getDocs(q);
-                const users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as User));
-                // Filter out current user if they are a photographer
-                setPhotographers(users.filter(u => u.id !== currentUserId));
+                const profilesSnap = await get(profilesRef);
+                const userIds = new Set<string>();
+
+                if (profilesSnap.exists()) {
+                    profilesSnap.forEach((child) => {
+                        const val = child.val();
+                        if (val.userId && val.userId !== currentUserId) {
+                            userIds.add(val.userId);
+                        }
+                    });
+                }
+
+                // 2. Fetch Users individually (allowed by rules)
+                const fetchedUsers: User[] = [];
+                await Promise.all(Array.from(userIds).map(async (uid) => {
+                    try {
+                        const userSnap = await get(ref(database, `users/${uid}`));
+                        if (userSnap.exists()) {
+                            const u = userSnap.val();
+                            fetchedUsers.push({ id: uid, ...u });
+                        }
+                    } catch (e) {
+                        // ignore failed individual fetch
+                    }
+                }));
+
+                setPhotographers(fetchedUsers);
+
             } catch (error) {
                 console.error("Error fetching photographers:", error);
             }
         };
 
         fetchPhotographers();
-    }, [firestore, currentUserId]);
+    }, [database, currentUserId]);
 
     const filteredPhotographers = React.useMemo(() => {
         if (!searchQuery) return photographers;
@@ -200,7 +222,7 @@ export const ChatList = ({ chatRooms, usersMap, activeChatRoomId, currentUserId 
                                                 </p>
                                                 <p className="text-[10px] text-muted-foreground shrink-0 ml-2">
                                                     {room.lastMessage?.timestamp
-                                                        ? formatDistanceToNow(room.lastMessage.timestamp.toDate(), { addSuffix: false })
+                                                        ? formatDistanceToNow(new Date(room.lastMessage.timestamp), { addSuffix: false })
                                                         : ''}
                                                 </p>
                                             </div>

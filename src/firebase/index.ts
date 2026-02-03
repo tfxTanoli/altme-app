@@ -3,7 +3,7 @@
 import { firebaseConfig } from '@/firebase/Firebase';
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore, initializeFirestore } from 'firebase/firestore'
+// import { getFirestore, initializeFirestore } from 'firebase/firestore'  -- Removed for RTDB migration
 import { getStorage } from 'firebase/storage';
 import { getDatabase } from 'firebase/database';
 
@@ -16,8 +16,6 @@ export function initializeFirebase() {
 
   const app = initializeApp(firebaseConfig);
 
-  initializeFirestore(app, {});
-
   return getSdks(app);
 }
 
@@ -25,7 +23,6 @@ export function getSdks(firebaseApp: FirebaseApp) {
   return {
     firebaseApp,
     auth: getAuth(firebaseApp),
-    firestore: getFirestore(firebaseApp),
     storage: getStorage(firebaseApp),
     database: getDatabase(firebaseApp),
   };
@@ -33,7 +30,3 @@ export function getSdks(firebaseApp: FirebaseApp) {
 
 export * from './provider';
 export * from './client-provider';
-export * from './non-blocking-updates';
-export * from './non-blocking-login';
-export * from './errors';
-export * from './error-emitter';

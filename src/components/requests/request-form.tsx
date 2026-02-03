@@ -1,5 +1,3 @@
-
-
 'use client';
 
 import * as React from 'react';
@@ -41,8 +39,8 @@ import {
 } from '@/components/ui/select';
 import { Checkbox } from '@/components/ui/checkbox';
 import { countries } from '@/lib/countries';
-import { useFirestore, useUser, addDocumentNonBlocking, setDocumentNonBlocking, updateDocumentNonBlocking } from '@/firebase';
-import { collection, doc, serverTimestamp, updateDoc, addDoc, setDoc } from 'firebase/firestore';
+import { useUser, useDatabase } from '@/firebase';
+import { ref, push, update, serverTimestamp, set } from 'firebase/database';
 import type { ProjectRequest } from '@/lib/types';
 import { useRequestMediaUpload } from '@/hooks/use-request-media-upload';
 
@@ -84,7 +82,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
   const [selectedFiles, setSelectedFiles] = React.useState<File[]>([]);
   const [previews, setPreviews] = React.useState<Preview[]>([]);
   const { user } = useUser();
-  const firestore = useFirestore();
+  const database = useDatabase();
   const router = useRouter();
 
   const { uploadFiles, isUploading } = useRequestMediaUpload();
@@ -118,6 +116,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
         dates: request.dates ? request.dates.map(d => parse(d, 'PPP', new Date())) : undefined,
         copyrightOption: request.copyrightOption || 'license',
         datePreference: request.dates && request.dates.length > 0 ? 'set-dates' : 'flexible',
+        // @ts-ignore
         budget: request.budget,
       });
 
@@ -222,14 +221,6 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
     }
     setPreviews(newPreviews);
 
-    // Find the corresponding file in selectedFiles and remove it
-    // Note: This logic assumes selectedFiles order matches added previews order for *new* files.
-    // However, since we mix existing (url) and new (blob), we need to be careful.
-    // The current implementation of removeFile might be buggy if we mix them.
-    // Keep logically for now: We only remove from selectedFiles if it was in selectedFiles.
-    // Simplified approach: Rebuilding selectedFiles is hard without IDs.
-    // Better: Just filter selectedFiles based on name?
-    // Current implementation:
     const fileToRemove = selectedFiles.find(f => f.name === removedPreview.name);
     if (fileToRemove) {
       setSelectedFiles(prev => prev.filter(f => f !== fileToRemove));
@@ -243,7 +234,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
 
   async function onSubmit(values: z.infer<typeof formSchema>) {
     console.log("onSubmit triggered with values:", values);
-    if (!user || !firestore) {
+    if (!user || !database) {
       toast({
         variant: 'destructive',
         title: 'Authentication Error',
@@ -255,10 +246,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
     setIsSubmitting(true);
 
     try {
-      const filesToUpload = selectedFiles.filter((_, index) => previews.some(p => p.url.startsWith('blob:') && p.name === selectedFiles[index]?.name));
-      // safer upload logic:
-      // Actually we can just upload all in selectedFiles.
-
+      // Upload new files
       const referenceMediaUrls = await uploadFiles(selectedFiles);
 
       const processedValues: any = {
@@ -266,6 +254,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
         dates: values.dates ? values.dates.map(date => format(date, 'PPP')) : [],
         budget: Number.isNaN(values.budget) ? 0 : values.budget || 0,
         dateType: values.dateType || null,
+        updatedAt: serverTimestamp(),
       };
 
       if (isEditMode) {
@@ -278,29 +267,31 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
 
 
       if (isEditMode) {
-        const requestDocRef = doc(firestore, 'requests', request.id);
+        const requestRef = ref(database, `requests/${request.id}`);
         const updateData = Object.fromEntries(
           Object.entries(processedValues).filter(([_, v]) => v !== undefined)
         );
 
-        await updateDoc(requestDocRef, updateData);
+        await update(requestRef, updateData);
 
         toast({
           title: 'Request Updated!',
           description: 'Your changes have been saved.',
         });
       } else {
-        const requestsColRef = collection(firestore, 'requests');
+        const requestsRef = ref(database, 'requests');
+        const newRequestRef = push(requestsRef);
+
         const newRequestData = {
           ...processedValues,
+          id: newRequestRef.key,
           userId: user.uid,
           postedBy: user.displayName || user.email,
           status: 'Open' as const,
           createdAt: serverTimestamp(),
         };
-        const newDocRef = await addDoc(requestsColRef, newRequestData);
-        // We set the ID in the document itself for convenience
-        await setDoc(doc(requestsColRef, newDocRef.id), { id: newDocRef.id }, { merge: true });
+
+        await set(newRequestRef, newRequestData);
 
         toast({
           title: 'Request Submitted!',
@@ -308,11 +299,7 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
         });
       }
 
-      // form.reset(); // Don't reset if we are just closing the dialog, or do?
-      // If closing dialog, state clears.
-      // If redirecting, state clears.
       setSelectedFiles([]);
-      // setPreviews([]);
 
       if (onSuccess) {
         onSuccess();
@@ -734,5 +721,3 @@ export function RequestForm({ request, onSuccess }: RequestFormProps) {
     </Form>
   );
 }
-
-

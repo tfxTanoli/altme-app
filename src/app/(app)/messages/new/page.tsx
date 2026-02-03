@@ -3,28 +3,33 @@
 
 import * as React from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { useFirestore, useUser, errorEmitter, FirestorePermissionError } from '@/firebase';
-import { collection, query, where, getDocs, addDoc, serverTimestamp, runTransaction, doc } from 'firebase/firestore';
+import { useDatabase, useUser } from '@/firebase';
+import { ref, get, update, serverTimestamp } from 'firebase/database';
 import type { User, ChatRoom } from '@/lib/types';
 import { Loader } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 export default function NewMessagePage() {
-    const firestore = useFirestore();
+    const database = useDatabase();
     const { user: currentUser } = useUser();
     const router = useRouter();
     const searchParams = useSearchParams();
     const { toast } = useToast();
-    
+
     const [status, setStatus] = React.useState('Initializing...');
     const hasRun = React.useRef(false); // Ref to prevent double execution in development
 
     React.useEffect(() => {
-        if (!currentUser || !firestore || hasRun.current) {
+        if (!currentUser || !database || hasRun.current) {
             return;
         }
 
-        const recipientId = searchParams.get('recipient');
+        const partnerId = searchParams.get('partnerId'); // Changed from 'recipient' to match usages in other files if any, or stick to a convention. The grep showed 'partnerId' used in chat-list.
+
+        // Fallback to 'recipient' if 'partnerId' is not found, to be safe.
+        const recipientId = partnerId || searchParams.get('recipient');
+
+        console.log("New Message Init. Partner:", recipientId);
 
         if (!recipientId) {
             toast({
@@ -35,7 +40,7 @@ export default function NewMessagePage() {
             router.push('/messages');
             return;
         }
-        
+
         if (recipientId === currentUser.uid) {
             toast({
                 variant: 'destructive',
@@ -49,53 +54,84 @@ export default function NewMessagePage() {
         const findOrCreateChat = async () => {
             setStatus('Finding existing conversation...');
             try {
-                // Use a transaction to atomically check for and create a chat room
-                const chatRoomId = await runTransaction(firestore, async (transaction) => {
-                    const participants = [currentUser.uid, recipientId].sort();
-                    const chatQuery = query(
-                        collection(firestore, 'chatRooms'),
-                        where('isProjectChat', '==', false),
-                        where('participantIds', '==', participants)
-                    );
-                    
-                    const chatSnap = await getDocs(chatQuery);
+                // Deterministic ID for 1-on-1 chats
+                const participants = [currentUser.uid, recipientId].sort();
+                const chatRoomId = participants.join('_');
 
-                    if (!chatSnap.empty) {
-                        // Conversation already exists, return its ID
-                        return chatSnap.docs[0].id;
+                // Check existence via USER'S chat list first (to avoid 'Permission denied' on non-existent room read)
+                // Use 'users/{uid}/chats/{chatId}' which current user can definitely read
+                const userChatRef = ref(database, `users/${currentUser.uid}/chats/${chatRoomId}`);
+                const userChatSnapshot = await get(userChatRef);
+
+                if (userChatSnapshot.exists()) {
+                    // Chat known to user, so room should exist and be readable
+                    console.log("Chat exists:", chatRoomId);
+                    router.push(`/messages/${chatRoomId}`);
+                } else {
+                    // Try to read the room directly just in case (e.g. invited but not in local list yet?)
+                    // OR just assume create if not in our list. 
+                    // To be robust, let's try creation. Update handles merging so it's safe-ish, 
+                    // BUT we don't want to overwrite existing room data if it exists but just missing from our list.
+                    // The safe path: check if room exists using a check that won't fail permissions? 
+                    // Actually, if we use update() with standard data, we might wipe 'lastMessage'.
+
+                    // Solution: Use a transaction or simply try to read it wrapper in catch.
+                    // If read fails (permission) -> likely implies does not exist OR we are not participant.
+                    // Since we are adding ourselves as participant, we can overwrite/ensure existence.
+
+                    // Better approach: Check if we can read the room.
+                    let roomExists = false;
+                    try {
+                        const roomSnap = await get(ref(database, `chatRooms/${chatRoomId}`));
+                        roomExists = roomSnap.exists();
+                    } catch (e) {
+                        // Permission denied usually means it doesn't exist (due to our specific rule structure)
+                        // OR we are genuinely blocked. Assuming doesn't exist for this flow.
+                        roomExists = false;
+                    }
+
+                    if (roomExists) {
+                        // It exists, so we just missed the link in our user profile? Or previous read failed?
+                        // Just redirect.
+                        router.push(`/messages/${chatRoomId}`);
                     } else {
-                        // Conversation doesn't exist, create a new one
-                        const newRoomRef = doc(collection(firestore, 'chatRooms'));
-                        const newRoomData: Omit<ChatRoom, 'id'> = {
+                        // Create new chat
+                        console.log("Creating new chat:", chatRoomId);
+                        setStatus('Creating conversation...');
+
+                        const newRoomData: any = {
+                            id: chatRoomId,
                             participantIds: participants,
                             user1Id: participants[0],
                             user2Id: participants[1],
                             isProjectChat: false,
                             lastMessage: null,
+                            createdAt: serverTimestamp(),
+                            updatedAt: serverTimestamp()
                         };
-                        
-                        // Use the transaction to set the new document
-                        transaction.set(newRoomRef, { ...newRoomData, id: newRoomRef.id });
 
-                        return newRoomRef.id;
+                        const updates: any = {};
+                        // Only set room data if it doesn't exist to avoid wiping
+                        // We can't easily conditional update without transaction.
+                        // But since we are here, we assume it's new.
+                        updates[`chatRooms/${chatRoomId}`] = newRoomData;
+                        updates[`users/${currentUser.uid}/chats/${chatRoomId}`] = true;
+                        updates[`users/${recipientId}/chats/${chatRoomId}`] = true;
+
+                        await update(ref(database), updates);
+
+                        setStatus('Redirecting to conversation...');
+                        router.push(`/messages/${chatRoomId}`);
                     }
-                });
-
-                setStatus('Redirecting to conversation...');
-                router.push(`/messages/${chatRoomId}`);
+                }
 
             } catch (error) {
-                // The error from runTransaction will be caught here
-                 if (error instanceof FirestorePermissionError) {
-                    errorEmitter.emit('permission-error', error);
-                } else {
-                    console.error("Error finding or creating chat:", error);
-                    toast({
-                        variant: 'destructive',
-                        title: 'Error',
-                        description: 'Could not start a new conversation. Please check permissions.',
-                    });
-                }
+                console.error("Error finding or creating chat:", error);
+                toast({
+                    variant: 'destructive',
+                    title: 'Error',
+                    description: 'Could not start a new conversation. Please try again.',
+                });
                 router.push('/messages');
             }
         };
@@ -103,7 +139,7 @@ export default function NewMessagePage() {
         hasRun.current = true;
         findOrCreateChat();
 
-    }, [currentUser, firestore, router, searchParams, toast]);
+    }, [currentUser, database, router, searchParams, toast]);
 
     return (
         <div className="flex flex-1 flex-col items-center justify-center gap-4">

@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useUser, useFirestore } from '@/firebase';
-import { doc, updateDoc, arrayUnion, arrayRemove, onSnapshot } from 'firebase/firestore';
+import { useUser, useDatabase } from '@/firebase';
+import { ref, onValue, set, get, child } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 
 type FavoriteType = 'photographer' | 'request';
 
 export function useFavorites(itemId: string, type: FavoriteType) {
     const { user } = useUser();
-    const firestore = useFirestore();
+    const database = useDatabase();
     const { toast } = useToast();
     const [isFavorite, setIsFavorite] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
@@ -15,25 +15,33 @@ export function useFavorites(itemId: string, type: FavoriteType) {
     const fieldName = type === 'photographer' ? 'favoritePhotographerIds' : 'favoriteRequestIds';
 
     useEffect(() => {
-        if (!user || !firestore) {
+        if (!user || !database) {
             setIsFavorite(false);
             setIsLoading(false);
             return;
         }
 
-        // Listen to the user document to keep state in sync
-        const userRef = doc(firestore, 'users', user.uid);
-        const unsubscribe = onSnapshot(userRef, (docSnap) => {
-            if (docSnap.exists()) {
-                const userData = docSnap.data();
-                const favorites = userData[fieldName] || [];
-                setIsFavorite(favorites.includes(itemId));
+        const userRef = ref(database, `users/${user.uid}/${fieldName}`);
+
+        const unsubscribe = onValue(userRef, (snapshot) => {
+            if (snapshot.exists()) {
+                const favorites = snapshot.val();
+                // Handle both array and object-map structures for flexibility
+                if (Array.isArray(favorites)) {
+                    setIsFavorite(favorites.includes(itemId));
+                } else if (typeof favorites === 'object') {
+                    setIsFavorite(!!favorites[itemId]);
+                } else {
+                    setIsFavorite(false);
+                }
+            } else {
+                setIsFavorite(false);
             }
             setIsLoading(false);
         });
 
         return () => unsubscribe();
-    }, [user, firestore, itemId, fieldName]);
+    }, [user, database, itemId, fieldName]);
 
     const toggleFavorite = useCallback(async (e?: React.MouseEvent) => {
         if (e) {
@@ -50,21 +58,36 @@ export function useFavorites(itemId: string, type: FavoriteType) {
             return;
         }
 
-        if (!firestore) return;
+        if (!database) return;
 
         try {
-            const userRef = doc(firestore, 'users', user.uid);
+            const favoritesRef = ref(database, `users/${user.uid}/${fieldName}`);
+            const snapshot = await get(favoritesRef);
+            let currentFavorites: any = snapshot.exists() ? snapshot.val() : [];
+
+            // Convert to array if it is an object map
+            let favoritesArray: string[] = [];
+            if (Array.isArray(currentFavorites)) {
+                favoritesArray = currentFavorites;
+            } else if (typeof currentFavorites === 'object') {
+                favoritesArray = Object.keys(currentFavorites);
+            }
+
             if (isFavorite) {
-                await updateDoc(userRef, {
-                    [fieldName]: arrayRemove(itemId)
-                });
+                // Remove
+                favoritesArray = favoritesArray.filter(id => id !== itemId);
                 toast({ description: "Removed from favorites" });
             } else {
-                await updateDoc(userRef, {
-                    [fieldName]: arrayUnion(itemId)
-                });
+                // Add
+                if (!favoritesArray.includes(itemId)) {
+                    favoritesArray.push(itemId);
+                }
                 toast({ description: "Added to favorites" });
             }
+
+            // Write back as array
+            await set(favoritesRef, favoritesArray);
+
         } catch (error) {
             console.error("Error toggling favorite:", error);
             toast({
@@ -73,7 +96,7 @@ export function useFavorites(itemId: string, type: FavoriteType) {
                 variant: 'destructive',
             });
         }
-    }, [user, firestore, isFavorite, itemId, fieldName, toast]);
+    }, [user, database, isFavorite, itemId, fieldName, toast]);
 
     return { isFavorite, toggleFavorite, isLoading };
 }

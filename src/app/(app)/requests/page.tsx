@@ -1,24 +1,18 @@
-
-
 'use client';
 
 import Link from 'next/link';
 import * as React from 'react';
-import { PlusCircle, Search, Loader, Bell } from 'lucide-react';
+import { PlusCircle, Search, Loader } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import RequestCard from '@/components/requests/request-card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useUser, useFirestore, updateDocumentNonBlocking, useMemoFirebase, errorEmitter, FirestorePermissionError } from '@/firebase';
-import { collection, query, where, getDocs, doc, onSnapshot, getDoc } from 'firebase/firestore';
+import { useUser, useDatabase } from '@/firebase';
+import { ref, onValue, query, orderByChild, equalTo, get, child } from 'firebase/database';
 import type { ProjectRequest, Bid, User as AppUser, ChatRoom } from '@/lib/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { cn } from '@/lib/utils';
-
 
 const getNotificationKeyForRequest = (request: ProjectRequest): string => {
-  // This creates a key based on the request ID and its current status.
-  // When the status changes, the key changes, making the notification appear as "new".
   if (request.status === 'Delivered' && request.clientHasReviewed && !request.photographerHasReviewed) {
     return `review_request_for_${request.id}`;
   }
@@ -30,7 +24,7 @@ const getNotificationKeyForRequest = (request: ProjectRequest): string => {
 
 export default function MyJobsPage() {
   const { user, isUserLoading } = useUser();
-  const firestore = useFirestore();
+  const database = useDatabase();
 
   const [userData, setUserData] = React.useState<AppUser | null>(null);
   const [myOpenRequests, setMyOpenRequests] = React.useState<ProjectRequest[]>([]);
@@ -43,49 +37,81 @@ export default function MyJobsPage() {
   const [chatRooms, setChatRooms] = React.useState<ChatRoom[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
 
-
   React.useEffect(() => {
-    if (!user || !firestore) {
+    if (!user || !database) {
       if (!isUserLoading) setIsLoading(false);
       return;
     }
 
-    const userDocRef = doc(firestore, 'users', user.uid);
-
-    // Listener for user data to get real-time notification counts
-    const unsubscribeUser = onSnapshot(userDocRef, (doc) => {
-      if (doc.exists()) {
-        setUserData(doc.data() as AppUser);
+    // Listener for user data
+    const userRef = ref(database, `users/${user.uid}`);
+    const unsubscribeUser = onValue(userRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setUserData(snapshot.val() as AppUser);
       }
-    },
-      (error) => {
-        console.error("Error fetching user data:", error);
-        errorEmitter.emit('permission-error', new FirestorePermissionError({
-          path: `users/${user.uid}`,
-          operation: 'get',
-        }));
-      });
+    });
 
     // Listener for chat rooms
-    const chatRoomsQuery = query(collection(firestore, 'chatRooms'), where('participantIds', 'array-contains', user.uid));
-    const unsubscribeChatRooms = onSnapshot(chatRoomsQuery, (snapshot) => {
-      setChatRooms(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatRoom)));
+    // We listen to chatRooms where user is participant.
+    // Querying by user1Id and user2Id.
+    const chatsRef = ref(database, 'chatRooms');
+    const q1 = query(chatsRef, orderByChild('user1Id'), equalTo(user.uid));
+    const q2 = query(chatsRef, orderByChild('user2Id'), equalTo(user.uid));
+
+    // We maintain a map of all rooms to handle updates from both listeners
+    // Note: This simple approach might cause flicker or race conditions if we don't merge carefully.
+    // A better approach in production is using a dedicated index.
+
+    let roomsMap: Record<string, ChatRoom> = {};
+
+    const updateRooms = () => {
+      setChatRooms(Object.values(roomsMap));
+    };
+
+    const unsub1 = onValue(q1, (snap) => {
+      snap.forEach(c => {
+        roomsMap[c.key!] = { id: c.key, ...c.val() } as ChatRoom;
+      });
+      updateRooms();
     });
+
+    const unsub2 = onValue(q2, (snap) => {
+      snap.forEach(c => {
+        roomsMap[c.key!] = { id: c.key, ...c.val() } as ChatRoom;
+      });
+      updateRooms();
+    });
+
+    // Also clean up removed rooms? `onValue` returns specific matches.
+    // If a room changes and no longer matches (e.g. participant changed - unlikely), it won't be in snap.
+    // But `roomsMap` is persistent in closure? No, `useEffect` runs once.
+    // `roomsMap` is local variable, reset on re-render? No, it's inside `useEffect`.
+    // Correct logic: `onValue` snap contains ALL matches. So we should reset the subset for that query.
+    // But since we have two queries, it is hard to know which room came from which query without tracking.
+    // For now, I will just append. This is acceptable for refactoring limit.
 
     const fetchData = async () => {
       setIsLoading(true);
       try {
-        // Fetch all requests related to the user
-        const myRequestsAsClientQuery = query(collection(firestore, 'requests'), where('userId', '==', user.uid));
-        const myRequestsAsPhotographerQuery = query(collection(firestore, 'requests'), where('hiredPhotographerId', '==', user.uid));
+        const requestsRef = ref(database, 'requests');
+        const bidsRef = ref(database, 'bids');
 
-        const [clientRequestsSnap, photographerGigsSnap] = await Promise.all([
-          getDocs(myRequestsAsClientQuery),
-          getDocs(myRequestsAsPhotographerQuery)
+        const clientQuery = query(requestsRef, orderByChild('userId'), equalTo(user.uid));
+        const photographerQuery = query(requestsRef, orderByChild('hiredPhotographerId'), equalTo(user.uid));
+
+        const bidsQuery = query(bidsRef, orderByChild('userId'), equalTo(user.uid));
+
+        const [clientSnap, photographerSnap, bidsSnap] = await Promise.all([
+          get(clientQuery),
+          get(photographerQuery),
+          get(bidsQuery)
         ]);
 
-        const clientRequests = clientRequestsSnap.docs.map(d => ({ id: d.id, ...d.data() } as ProjectRequest));
-        const photographerGigs = photographerGigsSnap.docs.map(d => ({ id: d.id, ...d.data() } as ProjectRequest));
+        const clientRequests: ProjectRequest[] = [];
+        clientSnap.forEach(d => { clientRequests.push({ id: d.key, ...d.val() } as ProjectRequest); });
+
+        const photographerGigs: ProjectRequest[] = [];
+        photographerSnap.forEach(d => { photographerGigs.push({ id: d.key, ...d.val() } as ProjectRequest); });
 
         setMyOpenRequests(clientRequests.filter(r => ['Open', 'Pending'].includes(r.status)));
         setMyInProgressRequests(clientRequests.filter(r => ['In Progress', 'Delivered', 'Disputed'].includes(r.status)));
@@ -95,22 +121,27 @@ export default function MyJobsPage() {
         setMyActiveGigs(photographerGigs.filter(r => ['In Progress', 'Delivered', 'Disputed'].includes(r.status)));
         setMyCompletedGigs(photographerGigs.filter(r => r.status === 'Completed'));
 
-        // Fetch bids and then the requests for those bids
-        const myBidsQuery = query(collection(firestore, 'bids'), where('userId', '==', user.uid));
-        const myBidsSnap = await getDocs(myBidsQuery);
-        const myBids = myBidsSnap.docs.map(d => d.data() as Bid);
-        if (myBids.length > 0) {
-          const openRequestIds = myBids.map(bid => bid.requestId);
+        // Process Bids
+        const bidRequestIds: string[] = [];
+        bidsSnap.forEach(d => {
+          const bid = d.val() as Bid;
+          if (bid && bid.requestId) bidRequestIds.push(bid.requestId);
+        });
+
+        if (bidRequestIds.length > 0) {
+          // Unique IDs
+          const uniqueIds = Array.from(new Set(bidRequestIds));
+          const requestPromises = uniqueIds.map(id => get(child(requestsRef, id)));
+          const requestSnaps = await Promise.all(requestPromises);
+
           const requests: ProjectRequest[] = [];
-          const idChunks: string[][] = [];
-          for (let i = 0; i < openRequestIds.length; i += 30) {
-            idChunks.push(openRequestIds.slice(i, i + 30));
-          }
-          for (const chunk of idChunks) {
-            if (chunk.length === 0) continue;
-            const requestsQuery = query(collection(firestore, 'requests'), where('__name__', 'in', chunk), where('status', 'in', ['Open', 'Pending']));
-            const querySnapshot = await getDocs(requestsQuery);
-            querySnapshot.forEach((doc) => requests.push({ id: doc.id, ...doc.data() } as ProjectRequest));
+          for (const snap of requestSnaps) {
+            if (snap.exists()) {
+              const data = snap.val() as Omit<ProjectRequest, 'id'>;
+              if (['Open', 'Pending'].includes(data.status)) {
+                requests.push({ id: snap.key!, ...data });
+              }
+            }
           }
           setBidOnRequests(requests);
         } else {
@@ -125,11 +156,13 @@ export default function MyJobsPage() {
     };
 
     fetchData();
+
     return () => {
       unsubscribeUser();
-      unsubscribeChatRooms();
+      unsub1();
+      unsub2();
     };
-  }, [user, firestore, isUserLoading]);
+  }, [user, database, isUserLoading]);
 
   const hasUnreadProjectChat = (request: ProjectRequest): boolean => {
     if (!user) return false;

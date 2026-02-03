@@ -164,7 +164,8 @@ export default function ProfilePage() {
                 await update(profileRef, {
                     bio: values.bio || "",
                     serviceCountry: values.serviceCountry || "",
-                    areas
+                    areas,
+                    name: values.name // Denormalize name for public access
                 });
             } else { // Create new profile
                 const profilesRef = ref(database, 'photographerProfiles');
@@ -176,6 +177,8 @@ export default function ProfilePage() {
                     serviceCountry: values.serviceCountry || "",
                     areas,
                     isAcceptingRequests: true, // Default to true on creation
+                    name: values.name, // Denormalize name
+                    photoURL: userData?.photoURL || user.photoURL || undefined, // Denormalize photoURL if available
                 };
                 await set(newProfileRef, newProfileData);
                 setPhotographerProfile(newProfileData);

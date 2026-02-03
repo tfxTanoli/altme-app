@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { useUser, useFirestore, updateDocumentNonBlocking, useAuth } from '@/firebase';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { useUser, useDatabase, useAuth } from '@/firebase';
+import { ref, get, update } from 'firebase/database';
 import type { User } from '@/lib/types';
 import { Loader, Shield } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
@@ -22,7 +22,7 @@ import { Input } from '@/components/ui/input';
 import { EmailAuthProvider, reauthenticateWithCredential, updatePassword, verifyBeforeUpdateEmail } from 'firebase/auth';
 
 const emailSchema = z.object({
-  email: z.string().email({ message: 'Please enter a valid email address.' }),
+    email: z.string().email({ message: 'Please enter a valid email address.' }),
 });
 
 const passwordSchema = z.object({
@@ -36,11 +36,11 @@ const passwordSchema = z.object({
 
 export default function SettingsPage() {
     const { user, isUserLoading } = useUser();
-    const firestore = useFirestore();
+    const database = useDatabase();
     const auth = useAuth();
     const router = useRouter();
     const { toast } = useToast();
-    
+
     const [isSaving, setIsSaving] = React.useState(false);
     const [isDeleting, setIsDeleting] = React.useState(false);
     const [userData, setUserData] = React.useState<User | null>(null);
@@ -50,7 +50,7 @@ export default function SettingsPage() {
     const [reauthPassword, setReauthPassword] = React.useState('');
     const [reauthAction, setReauthAction] = React.useState<'email' | 'password' | null>(null);
     const [isReauthing, setIsReauthing] = React.useState(false);
-    
+
     const emailForm = useForm<z.infer<typeof emailSchema>>({
         resolver: zodResolver(emailSchema),
         defaultValues: { email: '' },
@@ -62,7 +62,7 @@ export default function SettingsPage() {
     });
 
     React.useEffect(() => {
-        if (!firestore || !user || !auth) {
+        if (!database || !user || !auth) {
             if (!isUserLoading) setIsLoading(false);
             return;
         };
@@ -70,10 +70,10 @@ export default function SettingsPage() {
         const fetchUserData = async () => {
             setIsLoading(true);
             try {
-                const userDocRef = doc(firestore, 'users', user.uid);
-                const docSnap = await getDoc(userDocRef);
+                const userRef = ref(database, `users/${user.uid}`);
+                const docSnap = await get(userRef);
                 if (docSnap.exists()) {
-                    const data = { id: docSnap.id, ...docSnap.data() } as User;
+                    const data = { id: user.uid, ...docSnap.val() } as User;
                     setUserData(data);
                     if (data.role === 'admin') {
                         emailForm.setValue('email', auth.currentUser?.email || '');
@@ -90,7 +90,7 @@ export default function SettingsPage() {
             }
         }
         fetchUserData();
-    }, [firestore, user, isUserLoading, emailForm, auth]);
+    }, [database, user, isUserLoading, emailForm, auth]);
 
     const handleReauthSubmit = async () => {
         if (!auth.currentUser || !reauthPassword || !reauthAction) return;
@@ -108,7 +108,7 @@ export default function SettingsPage() {
             } else if (reauthAction === 'password') {
                 await handleChangePassword(passwordForm.getValues());
             }
-            
+
             setReauthAction(null);
 
         } catch (error: any) {
@@ -123,23 +123,23 @@ export default function SettingsPage() {
     };
 
     const handleChangeEmail = async (values: z.infer<typeof emailSchema>) => {
-        if (!auth.currentUser || !firestore) return;
+        if (!auth.currentUser || !database) return;
         setIsSaving(true);
         try {
             await verifyBeforeUpdateEmail(auth.currentUser, values.email);
-            toast({ 
-                title: 'Verification Email Sent', 
-                description: `A verification link has been sent to ${values.email}. Please verify to complete the change. You will be logged out upon completion.` 
+            toast({
+                title: 'Verification Email Sent',
+                description: `A verification link has been sent to ${values.email}. Please verify to complete the change. You will be logged out upon completion.`
             });
         } catch (error: any) {
-             toast({ variant: 'destructive', title: 'Error', description: error.message });
+            toast({ variant: 'destructive', title: 'Error', description: error.message });
         } finally {
             setIsSaving(false);
         }
     };
 
     const handleChangePassword = async (values: z.infer<typeof passwordSchema>) => {
-         if (!auth.currentUser) return;
+        if (!auth.currentUser) return;
         setIsSaving(true);
         try {
             await updatePassword(auth.currentUser, values.newPassword);
@@ -163,29 +163,30 @@ export default function SettingsPage() {
     };
 
     const handleActivityStatusChange = async (checked: boolean) => {
-        if (!user || !firestore) return;
-        const userDocRef = doc(firestore, 'users', user.uid);
-        updateDocumentNonBlocking(userDocRef, { showActivityStatus: checked });
-        setUserData(prev => prev ? {...prev, showActivityStatus: checked} : null);
+        if (!user || !database) return;
+        const userRef = ref(database, `users/${user.uid}`);
+        update(userRef, { showActivityStatus: checked }).catch(e => console.error(e));
+
+        setUserData(prev => prev ? { ...prev, showActivityStatus: checked } : null);
         toast({
             title: 'Settings Saved',
             description: 'Your activity status preference has been updated.',
         });
     };
-    
+
     const handleDeleteAccount = async () => {
-        if (!user || !firestore || !auth.currentUser) {
+        if (!user || !database || !auth.currentUser) {
             toast({ variant: 'destructive', title: 'Error', description: 'Could not perform this action.' });
             return;
         }
         setIsDeleting(true);
         try {
-            const userRef = doc(firestore, 'users', user.uid);
-            await updateDoc(userRef, { status: 'deleted' });
+            const userRef = ref(database, `users/${user.uid}`);
+            await update(userRef, { status: 'deleted' });
             await auth.signOut();
             toast({ title: 'Account Disabled', description: 'Your account has been deactivated and you have been logged out.' });
             router.push('/');
-        } catch(error: any) {
+        } catch (error: any) {
             console.error("Error deactivating account:", error);
             toast({ variant: 'destructive', title: 'Error', description: 'Could not deactivate your account.' });
         } finally {
@@ -195,7 +196,7 @@ export default function SettingsPage() {
 
     if (isLoading || isUserLoading) {
         return (
-             <main className="flex flex-1 items-center justify-center">
+            <main className="flex flex-1 items-center justify-center">
                 <Loader className="h-8 w-8 animate-spin" />
             </main>
         )
@@ -212,7 +213,7 @@ export default function SettingsPage() {
                         </DialogDescription>
                     </DialogHeader>
                     <div className="space-y-4 py-4">
-                         <div className="space-y-2">
+                        <div className="space-y-2">
                             <Label htmlFor="reauth-password">Current Password</Label>
                             <Input
                                 id="reauth-password"
@@ -225,7 +226,7 @@ export default function SettingsPage() {
                     <DialogFooter>
                         <DialogClose asChild><Button variant="secondary" disabled={isReauthing}>Cancel</Button></DialogClose>
                         <Button onClick={handleReauthSubmit} disabled={isReauthing}>
-                             {isReauthing && <Loader className="mr-2 h-4 w-4 animate-spin" />}
+                            {isReauthing && <Loader className="mr-2 h-4 w-4 animate-spin" />}
                             Confirm
                         </Button>
                     </DialogFooter>
@@ -246,7 +247,7 @@ export default function SettingsPage() {
                         <CardContent className="space-y-8">
                             <Form {...emailForm}>
                                 <form onSubmit={emailForm.handleSubmit(onEmailSubmit)} className="space-y-4">
-                                     <FormField
+                                    <FormField
                                         control={emailForm.control}
                                         name="email"
                                         render={({ field }) => (
@@ -265,7 +266,7 @@ export default function SettingsPage() {
                                     </Button>
                                 </form>
                             </Form>
-                             <Form {...passwordForm}>
+                            <Form {...passwordForm}>
                                 <form onSubmit={passwordForm.handleSubmit(onPasswordSubmit)} className="space-y-4">
                                     <FormField
                                         control={passwordForm.control}
@@ -280,7 +281,7 @@ export default function SettingsPage() {
                                             </FormItem>
                                         )}
                                     />
-                                     <FormField
+                                    <FormField
                                         control={passwordForm.control}
                                         name="confirmPassword"
                                         render={({ field }) => (
@@ -317,8 +318,8 @@ export default function SettingsPage() {
                                                 Allow others to see when you are currently online.
                                             </span>
                                         </Label>
-                                        <Switch 
-                                            id="activity-status" 
+                                        <Switch
+                                            id="activity-status"
                                             checked={userData?.showActivityStatus ?? false}
                                             onCheckedChange={handleActivityStatusChange}
                                         />
@@ -338,18 +339,18 @@ export default function SettingsPage() {
                                         </AlertDialogTrigger>
                                         <AlertDialogContent>
                                             <AlertDialogHeader>
-                                            <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
-                                            <AlertDialogDescription>
-                                                This action will deactivate your account. You will be logged out and your profile and listings will no longer be visible. 
-                                                You can contact support to reactivate your account in the future.
-                                            </AlertDialogDescription>
+                                                <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+                                                <AlertDialogDescription>
+                                                    This action will deactivate your account. You will be logged out and your profile and listings will no longer be visible.
+                                                    You can contact support to reactivate your account in the future.
+                                                </AlertDialogDescription>
                                             </AlertDialogHeader>
                                             <AlertDialogFooter>
-                                            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
-                                            <AlertDialogAction onClick={handleDeleteAccount} disabled={isDeleting}>
-                                                {isDeleting && <Loader className="mr-2 h-4 w-4 animate-spin" />}
-                                                Deactivate
-                                            </AlertDialogAction>
+                                                <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+                                                <AlertDialogAction onClick={handleDeleteAccount} disabled={isDeleting}>
+                                                    {isDeleting && <Loader className="mr-2 h-4 w-4 animate-spin" />}
+                                                    Deactivate
+                                                </AlertDialogAction>
                                             </AlertDialogFooter>
                                         </AlertDialogContent>
                                     </AlertDialog>

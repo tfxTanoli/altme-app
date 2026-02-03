@@ -11,11 +11,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { useToast } from '@/hooks/use-toast';
-import { addDocumentNonBlocking, useFirestore, errorEmitter, FirestorePermissionError } from '@/firebase';
-import { collection, serverTimestamp } from 'firebase/firestore';
+import { useDatabase } from '@/firebase'; // Using useDatabase instead of useFirestore
+import { ref, push, set, serverTimestamp } from 'firebase/database';
 import { useState } from 'react';
 import { Loader } from 'lucide-react';
-import type { User } from '@/lib/types';
+import { sendContactEmail } from '@/actions/send-contact-email';
 
 const formSchema = z.object({
   name: z.string().min(2, { message: 'Name must be at least 2 characters.' }),
@@ -25,7 +25,7 @@ const formSchema = z.object({
 
 export default function ContactPage() {
   const { toast } = useToast();
-  const firestore = useFirestore();
+  const database = useDatabase();
   const [isLoading, setIsLoading] = useState(false);
 
   const form = useForm<z.infer<typeof formSchema>>({
@@ -38,64 +38,54 @@ export default function ContactPage() {
   });
 
   async function onSubmit(values: z.infer<typeof formSchema>) {
-    if (!firestore) {
-        toast({
-            variant: 'destructive',
-            title: 'Error',
-            description: 'Could not connect to the database. Please try again later.',
-        });
-        return;
+    if (!database) {
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Could not connect to the database. Please try again later.',
+      });
+      return;
     }
     setIsLoading(true);
     try {
-        // 1. Save the submission to the contactSubmissions collection.
-        const submissionData = {
-            ...values,
-            submittedAt: serverTimestamp(),
-        };
-        const submissionRef = await addDocumentNonBlocking(collection(firestore, 'contactSubmissions'), submissionData);
+      // 1. Save the submission to RTDB
+      const submissionsRef = ref(database, 'contactSubmissions');
+      const newSubmissionRef = push(submissionsRef);
 
-        if (submissionRef) {
-            // 2. After submission is saved, trigger the email.
-            const adminEmail = process.env.NEXT_PUBLIC_ADMIN_EMAIL;
-            if (adminEmail) {
-                const emailContent = `
-                    <p><strong>Name:</strong> ${values.name}</p>
-                    <p><strong>Email:</strong> ${values.email}</p>
-                    <p><strong>Message:</strong></p>
-                    <p>${values.message}</p>
-                `;
-                const mailData = {
-                    to: [adminEmail],
-                    message: {
-                        subject: `New Contact Form Submission from ${values.name}`,
-                        html: emailContent,
-                    },
-                };
-                // This call is non-blocking and will queue the email.
-                addDocumentNonBlocking(collection(firestore, 'mail'), mailData);
-            }
-            
-            toast({
-                title: 'Message Sent!',
-                description: "Thanks for reaching out. We'll get back to you soon.",
-            });
-            form.reset();
+      await set(newSubmissionRef, {
+        ...values,
+        submittedAt: serverTimestamp(),
+      });
 
-        } else {
-            // This would happen if addDocumentNonBlocking failed, e.g., due to permissions.
-            throw new Error("Failed to save contact submission.");
-        }
+      // 2. Send email via Server Action
+      const emailResult = await sendContactEmail({ ...values, id: newSubmissionRef.key as string });
+
+      if (emailResult.success) {
+        toast({
+          title: 'Message Sent!',
+          description: "Thanks for reaching out. We'll get back to you soon.",
+        });
+        form.reset();
+      } else {
+        // We still consider it a partial success if DB write worked but email failed?
+        // Usually better to fail safely or warn.
+        console.error("Email sending failed:", emailResult.error);
+        toast({
+          title: 'Message Saved',
+          description: "We received your message but couldn't send the confirmation email. We will check it shortly.",
+        });
+        form.reset();
+      }
 
     } catch (error) {
-        console.error("Error submitting contact form:", error);
-        toast({
-            variant: 'destructive',
-            title: 'Something went wrong',
-            description: 'There was an issue sending your message. Please try again.',
-        });
+      console.error("Error submitting contact form:", error);
+      toast({
+        variant: 'destructive',
+        title: 'Something went wrong',
+        description: 'There was an issue sending your message. Please try again.',
+      });
     } finally {
-        setIsLoading(false);
+      setIsLoading(false);
     }
   }
 
@@ -103,7 +93,7 @@ export default function ContactPage() {
     <main className="flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-8">
       <div className="mx-auto grid w-full max-w-2xl items-start gap-6">
         <div className="flex items-center">
-            <h1 className="font-semibold text-lg md:text-2xl">Contact Us</h1>
+          <h1 className="font-semibold text-lg md:text-2xl">Contact Us</h1>
         </div>
         <Card>
           <CardHeader>

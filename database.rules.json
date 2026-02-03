@@ -1,31 +1,155 @@
 {
     "rules": {
         "users": {
-            ".read": true,
-            "$userId": {
-                ".write": "$userId === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'"
+            ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'admin'",
+            "$uid": {
+                ".read": "auth != null",
+                ".write": "$uid === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'",
+                "chats": {
+                    "$chatId": {
+                        ".write": "auth != null && $chatId.contains(auth.uid)"
+                    }
+                },
+                "favoritePhotographerIds": {
+                    ".validate": true
+                },
+                "favoriteRequestIds": {
+                    ".validate": true
+                },
+                "unreadGigsCount": {
+                    ".write": "auth != null"
+                },
+                "pendingReviewCount": {
+                    ".write": "auth != null"
+                },
+                "balance": {
+                    ".write": "auth != null"
+                }
             }
         },
         "photographerProfiles": {
             ".read": true,
             ".indexOn": [
-                "isAcceptingRequests",
-                "userId"
+                "userId",
+                "isAcceptingRequests"
             ],
-            "$photographerId": {
-                ".write": "(data.exists() ? data.child('userId').val() === auth.uid : newData.child('userId').val() === auth.uid) || root.child('users').child(auth.uid).child('role').val() === 'admin'"
+            "$profileId": {
+                ".write": "auth != null && (!data.exists() || data.child('userId').val() === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin')"
             }
         },
-        "notifications": {
-            "$userId": {
-                ".indexOn": [
-                    "timestamp"
-                ],
-                ".read": "$userId === auth.uid",
-                "$notificationId": {
+        "requests": {
+            ".read": true,
+            ".indexOn": [
+                "userId",
+                "clientId",
+                "hiredPhotographerId",
+                "status",
+                "createdAt"
+            ],
+            "$requestId": {
+                ".write": "auth != null && (!data.exists() || data.child('userId').val() === auth.uid || data.child('hiredPhotographerId').val() === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+                "unreadBidsCount": {
                     ".write": "auth != null"
                 }
             }
+        },
+        "bids": {
+            ".read": true,
+            ".indexOn": [
+                "requestId",
+                "photographerId",
+                "userId",
+                "status"
+            ],
+            "$bidId": {
+                ".write": "auth != null"
+            }
+        },
+        "reviews": {
+            ".read": true,
+            ".indexOn": [
+                "photographerId",
+                "reviewerId",
+                "revieweeId",
+                "requestId"
+            ],
+            "$reviewId": {
+                ".write": "auth != null"
+            }
+        },
+        "chatRooms": {
+            "$roomId": {
+                ".read": "auth != null && (data.child('participantIds').hasChild(auth.uid) || data.child('user1Id').val() === auth.uid || data.child('user2Id').val() === auth.uid)",
+                ".write": "auth != null"
+            }
+        },
+        "chatMessages": {
+            "$roomId": {
+                ".read": "auth != null && (root.child('chatRooms').child($roomId).child('participantIds').hasChild(auth.uid) || root.child('chatRooms').child($roomId).child('user1Id').val() === auth.uid || root.child('chatRooms').child($roomId).child('user2Id').val() === auth.uid)",
+                ".write": "auth != null && (root.child('chatRooms').child($roomId).child('participantIds').hasChild(auth.uid) || root.child('chatRooms').child($roomId).child('user1Id').val() === auth.uid || root.child('chatRooms').child($roomId).child('user2Id').val() === auth.uid)",
+                ".indexOn": [
+                    "timestamp"
+                ]
+            }
+        },
+        "contentDeliveries": {
+            "$requestId": {
+                ".read": "auth != null",
+                "$deliveryId": {
+                    ".write": "auth != null"
+                }
+            }
+        },
+        "notifications": {
+            "$uid": {
+                ".read": "auth != null && $uid === auth.uid",
+                ".write": "auth != null",
+                ".indexOn": [
+                    "timestamp"
+                ]
+            }
+        },
+        "reports": {
+            ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'admin'",
+            ".indexOn": [
+                "reporterId",
+                "reportedUserId",
+                "status",
+                "createdAt"
+            ],
+            "$reportId": {
+                ".write": "auth != null"
+            }
+        },
+        "escrowPayments": {
+            ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'admin'",
+            ".indexOn": [
+                "status",
+                "requestId",
+                "photographerId",
+                "clientId"
+            ],
+            "$paymentId": {
+                ".write": "auth != null"
+            }
+        },
+        "payoutRequests": {
+            ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'admin'",
+            ".indexOn": [
+                "photographerId",
+                "status",
+                "createdAt"
+            ],
+            "$payoutId": {
+                ".write": "auth != null"
+            }
+        },
+        "contactSubmissions": {
+            ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'admin'",
+            ".indexOn": [
+                "submittedAt"
+            ],
+            ".write": true
         }
     }
 }

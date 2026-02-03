@@ -3,7 +3,7 @@ import { useState, useRef } from 'react';
 import { useAuth, useStorage, useUser, useFirebase } from '@/firebase';
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { updateProfile } from 'firebase/auth';
-import { ref as databaseRef, update } from 'firebase/database';
+import { ref as databaseRef, update, query, orderByChild, equalTo, get } from 'firebase/database';
 import { useToast } from './use-toast';
 
 export const useProfilePhotoUpload = () => {
@@ -56,6 +56,19 @@ export const useProfilePhotoUpload = () => {
             // 4. Update user node in Realtime Database
             const userNodeRef = databaseRef(database, `users/${user.uid}`);
             await update(userNodeRef, { photoURL: downloadURL });
+
+            // 5. Update photographer profile if it exists (for public access)
+            try {
+                const profilesQuery = query(databaseRef(database, 'photographerProfiles'), orderByChild('userId'), equalTo(user.uid));
+                const snapshot = await get(profilesQuery);
+                if (snapshot.exists()) {
+                    const profileId = Object.keys(snapshot.val())[0];
+                    const profileRef = databaseRef(database, `photographerProfiles/${profileId}`);
+                    await update(profileRef, { photoURL: downloadURL });
+                }
+            } catch (err) {
+                console.warn('Could not sync photo to photographer profile:', err);
+            }
 
             toast({
                 title: 'Photo updated!',

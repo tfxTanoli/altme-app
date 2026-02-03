@@ -1,9 +1,8 @@
 
 'use client';
 
-import { useFirestore, errorEmitter, FirestorePermissionError, useUser, useDatabase } from '@/firebase';
-import { ref, update } from 'firebase/database';
-import { collection, getDocs, orderBy, query, doc } from 'firebase/firestore';
+import { useUser, useDatabase } from '@/firebase';
+import { ref, update, query, orderByChild, get } from 'firebase/database';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Loader } from 'lucide-react';
@@ -22,29 +21,41 @@ type ContactSubmission = {
 };
 
 export default function InboxPage() {
-  const firestore = useFirestore();
   const database = useDatabase();
   const { user } = useUser();
   const [submissions, setSubmissions] = useState<ContactSubmission[] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+
   useEffect(() => {
-    if (!firestore) return;
+    if (!database) return;
 
     const fetchSubmissions = async () => {
       setIsLoading(true);
       try {
-        const submissionsRef = collection(firestore, 'contactSubmissions');
-        const q = query(submissionsRef, orderBy('submittedAt', 'desc'));
-        const snapshot = await getDocs(q).catch(err => {
-          console.error("Permission error (Inbox):", err);
-          return { docs: [] };
-        });
-        const submissionData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ContactSubmission));
-        setSubmissions(submissionData);
+        const submissionsRef = query(ref(database, 'contactSubmissions'), orderByChild('submittedAt'));
+        const snapshot = await get(submissionsRef);
+
+        if (snapshot.exists()) {
+          const data = snapshot.val();
+          const submissionData = Object.keys(data).map(key => ({
+            id: key,
+            ...data[key]
+          })) as ContactSubmission[];
+
+          // Sort client side descending
+          submissionData.sort((a, b) => {
+            const getTime = (d: any) => d?.seconds ? d.seconds * 1000 : (typeof d === 'number' ? d : 0);
+            return getTime(b.submittedAt) - getTime(a.submittedAt);
+          });
+
+          setSubmissions(submissionData);
+        } else {
+          setSubmissions([]);
+        }
 
         // Reset notification count for admin (RTDB)
-        if (user && database) {
+        if (user) {
           const userRef = ref(database, `users/${user.uid}`);
           update(userRef, { unreadContactSubmissionsCount: 0 }).catch(e => console.error("Error updating inbox stats:", e));
         }
@@ -58,8 +69,7 @@ export default function InboxPage() {
     }
 
     fetchSubmissions();
-    fetchSubmissions();
-  }, [firestore, database, user]);
+  }, [database, user]);
 
   return (
     <main className="flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-8">

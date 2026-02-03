@@ -3,17 +3,16 @@
 'use client';
 
 import * as React from 'react';
-import { useFirestore, useUser, errorEmitter, FirestorePermissionError, initializeFirebase } from '@/firebase';
-import { collection, query, where, orderBy, onSnapshot, getDocs } from 'firebase/firestore';
-import { getDatabase, ref, get } from 'firebase/database';
+import { useUser, useDatabase, initializeFirebase } from '@/firebase';
+import { ref, onValue, get, off } from 'firebase/database';
 import type { ChatRoom, User } from '@/lib/types';
 import { Loader, MessageSquare } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { ChatView } from '@/components/chat/chat-view';
 import { ChatList } from '@/components/chat/chat-list';
 
-export default function MessagesPage({ params }: { params: { id?: string } }) {
-    const firestore = useFirestore();
+export default function MessagesPage() {
+    const database = useDatabase();
     const { user: currentUser } = useUser();
     const [chatRooms, setChatRooms] = React.useState<ChatRoom[]>([]);
     const [usersMap, setUsersMap] = React.useState<Map<string, User>>(new Map());
@@ -27,63 +26,92 @@ export default function MessagesPage({ params }: { params: { id?: string } }) {
     }, [chatRooms, activeChatRoomId]);
 
     React.useEffect(() => {
-        if (!currentUser || !firestore) {
+        if (!currentUser || !database) {
             setIsLoading(false);
             return;
-        };
+        }
 
-        const chatRoomsQuery = query(
-            collection(firestore, 'chatRooms'),
-            where('participantIds', 'array-contains', currentUser.uid),
-            where('isProjectChat', '==', false)
-        );
+        const userChatsRef = ref(database, `users/${currentUser.uid}/chats`);
 
-        const unsubscribe = onSnapshot(chatRoomsQuery, async (snapshot) => {
-            const allRooms = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatRoom));
-            // Show all rooms, even empty ones (important for new chats)
-            const rooms = allRooms;
-            rooms.sort((a, b) => (b.lastMessage?.timestamp?.toMillis() || 0) - (a.lastMessage?.timestamp?.toMillis() || 0));
-            setChatRooms(rooms);
+        const unsubscribe = onValue(userChatsRef, async (snapshot) => {
+            if (snapshot.exists()) {
+                const chatIds = Object.keys(snapshot.val());
 
-            if (rooms.length > 0) {
-                const partnerIds = new Set(rooms.map(room => room.participantIds.find(id => id !== currentUser.uid)).filter(Boolean) as string[]);
+                const loadedRooms: ChatRoom[] = [];
+                // Fetch each room details
+                await Promise.all(chatIds.map(async (chatId) => {
+                    const roomRef = ref(database, `chatRooms/${chatId}`);
+                    // For now, we use get() here, but ideally we might want to listen to updates for these rooms too
+                    // To keep it simple, let's just fetch once on list update.
+                    // If we want real-time ordering updates (new message), we need to listen to each room or a unified 'user_chats_metadata' path.
+                    // Given the structure, we'll fetch once. Real-time message updates inside the chat view are handled separately.
+                    // BUT for the list to reorder, we need real-time data or at least polling.
+                    // A better structure in RTDB would be `users/{uid}/chats/{chatId} = { timestamp: ... }` to sort quickly.
 
-                const newUsersMap = new Map(usersMap);
-                const idsToFetch = Array.from(partnerIds).filter(id => !newUsersMap.has(id));
-
-                if (idsToFetch.length > 0) {
-                    const { database } = initializeFirebase();
-                    // Fetch users from RTDB instead of Firestore
-                    await Promise.all(idsToFetch.map(async (uid) => {
-                        const userRef = ref(database, `users/${uid}`);
-                        try {
-                            const snapshot = await get(userRef);
-                            if (snapshot.exists()) {
-                                newUsersMap.set(uid, { id: uid, ...snapshot.val() } as User);
-                            } else {
-                                console.warn(`User ${uid} not found in RTDB`);
+                    try {
+                        const roomSnap = await get(roomRef);
+                        if (roomSnap.exists()) {
+                            const roomData = roomSnap.val();
+                            // Client-side filter for project chats if strictly separate, but here we show all?
+                            // The original code filtered: where('isProjectChat', '==', false)
+                            if (roomData.isProjectChat === false) {
+                                loadedRooms.push({ id: chatId, ...roomData } as ChatRoom);
                             }
-                        } catch (err) {
-                            console.error(`Failed to fetch user ${uid} from RTDB`, err);
                         }
-                    }));
-                    setUsersMap(newUsersMap);
+                    } catch (e) {
+                        console.error(`Failed to load room ${chatId}`, e);
+                    }
+                }));
+
+
+                // Sort by last message timestamp
+                loadedRooms.sort((a, b) => {
+                    const getMillis = (t: any) => {
+                        if (!t) return 0;
+                        if (typeof t === 'number') return t;
+                        if (t instanceof Date) return t.getTime();
+                        if (typeof t?.toMillis === 'function') return t.toMillis();
+                        if (t?.seconds) return t.seconds * 1000;
+                        return new Date(t).getTime();
+                    };
+                    return getMillis(b.lastMessage?.timestamp) - getMillis(a.lastMessage?.timestamp);
+                });
+
+                setChatRooms(loadedRooms);
+
+                // Fetch Users
+                if (loadedRooms.length > 0) {
+                    const partnerIds = new Set(loadedRooms.map(room => room.participantIds.find(id => id !== currentUser.uid)).filter(Boolean) as string[]);
+
+                    const newUsersMap = new Map(usersMap);
+                    const idsToFetch = Array.from(partnerIds).filter(id => !newUsersMap.has(id));
+
+                    if (idsToFetch.length > 0) {
+                        await Promise.all(idsToFetch.map(async (uid) => {
+                            const userRef = ref(database, `users/${uid}`);
+                            try {
+                                const snapshot = await get(userRef);
+                                if (snapshot.exists()) {
+                                    newUsersMap.set(uid, { id: uid, ...snapshot.val() } as User);
+                                }
+                            } catch (err) {
+                                console.error(`Failed to fetch user ${uid} from RTDB`, err);
+                            }
+                        }));
+                        setUsersMap(newUsersMap);
+                    }
                 }
+            } else {
+                setChatRooms([]);
             }
             setIsLoading(false);
         }, (error) => {
-            console.error("Error listening to chat rooms:", error);
-            if (!error.message.includes('requires an index')) {
-                errorEmitter.emit('permission-error', new FirestorePermissionError({
-                    path: 'chatRooms',
-                    operation: 'list',
-                }));
-            }
+            console.error("Error listening to user chats:", error);
             setIsLoading(false);
         });
 
         return () => unsubscribe();
-    }, [currentUser, firestore]); // Removed usersMap from dependency to avoid infinite loop if logic was flawed, though safe here.
+    }, [currentUser, database]); // removed usersMap dependence to avoid loops
 
     const activePartner = React.useMemo(() => {
         if (!activeChatRoom || !currentUser) return null;

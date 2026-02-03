@@ -2,8 +2,8 @@
 'use client';
 
 import * as React from 'react';
-import { useFirestore, errorEmitter, FirestorePermissionError, useMemoFirebase } from '@/firebase';
-import { collection, query, orderBy, onSnapshot, getDocs, where, writeBatch, doc, getDoc } from 'firebase/firestore';
+import { useDatabase, useMemoFirebase } from '@/firebase';
+import { ref, onValue, get, query, orderByChild } from 'firebase/database';
 import type { ChatRoom, User } from '@/lib/types';
 import Link from 'next/link';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -44,11 +44,11 @@ const ChatListItem = React.memo(({ chatRoom, partners, isActive }: { chatRoom: C
                 <div className="flex-1 overflow-hidden">
                     <div className="flex items-center justify-between">
                         <p className="truncate font-semibold">{partnerNames}</p>
-                        <p className="text-xs text-muted-foreground">
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">
                             {chatRoom.lastMessage?.timestamp
-                                ? formatDistanceToNow(chatRoom.lastMessage.timestamp.toDate(), { addSuffix: true })
-                                : ''}
-                        </p>
+                                ? formatDistanceToNow(new Date(chatRoom.lastMessage.timestamp), { addSuffix: true })
+                                : 'No messages'}
+                        </span>
                     </div>
                     <p className="truncate text-sm text-muted-foreground">
                         {chatRoom.lastMessage?.text || 'No messages yet'}
@@ -62,7 +62,7 @@ ChatListItem.displayName = 'ChatListItem';
 
 
 export default function AdminChatsPage() {
-    const firestore = useFirestore();
+    const database = useDatabase();
     const router = useRouter();
     const searchParams = useSearchParams();
     const activeChatId = searchParams.get('chatId');
@@ -74,35 +74,45 @@ export default function AdminChatsPage() {
 
     // Fetch all chat rooms and unify them
     React.useEffect(() => {
-        if (!firestore) return;
+        if (!database) return;
 
-        const chatRoomsQuery = query(collection(firestore, 'chatRooms'), orderBy('lastMessage.timestamp', 'desc'));
+        // Listen to all chat rooms
+        // If too many rooms, might need pagination or "active" filter.
+        // For Admin, seeing all might be okay for now, or use limitToLast.
+        const chatRoomsRef = query(ref(database, 'chatRooms'), orderByChild('lastMessage/timestamp'));
 
-        const unsubscribe = onSnapshot(chatRoomsQuery, async (snapshot) => {
+        const unsubscribe = onValue(chatRoomsRef, async (snapshot) => {
             setIsLoading(true);
-            const allRooms = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatRoom));
+            if (!snapshot.exists()) {
+                setUnifiedChatRooms([]);
+                setIsLoading(false);
+                return;
+            }
+
+            const data = snapshot.val();
+            const allRooms = Object.keys(data).map(key => ({
+                id: key,
+                ...data[key]
+            })) as ChatRoom[];
 
             // 1. Fetch all users first
-            const allParticipantIds = allRooms.flatMap(room => room.participantIds);
+            const allParticipantIds = allRooms.flatMap(room => room.participantIds || []);
             const uniqueParticipantIds = [...new Set(allParticipantIds)];
 
             const newUsersMap = new Map<string, User>();
             if (uniqueParticipantIds.length > 0) {
-                const userChunks: string[][] = [];
-                for (let i = 0; i < uniqueParticipantIds.length; i += 30) {
-                    userChunks.push(uniqueParticipantIds.slice(i, i + 30));
-                }
-
-                await Promise.all(userChunks.map(async chunk => {
-                    if (chunk.length === 0) return;
+                // Fetch users individually (or parallel) since RTDB doesn't have 'in' query
+                // Optimization: Only fetch users not already in map if we were caching, 
+                // but here we rebuild.
+                // Batched fetch not native, so promise.all
+                await Promise.all(uniqueParticipantIds.map(async (uid) => {
                     try {
-                        const usersQuery = query(collection(firestore, 'users'), where('__name__', 'in', chunk));
-                        const usersSnapshot = await getDocs(usersQuery);
-                        usersSnapshot.forEach(doc => {
-                            newUsersMap.set(doc.id, { id: doc.id, ...doc.data() } as User);
-                        });
+                        const userSnap = await get(ref(database, `users/${uid}`));
+                        if (userSnap.exists()) {
+                            newUsersMap.set(uid, { id: uid, ...userSnap.val() } as User);
+                        }
                     } catch (e) {
-                        console.error("Error fetching users chunk", e);
+                        console.warn(`Failed to fetch user ${uid}`, e);
                     }
                 }));
                 setUsersMap(newUsersMap);
@@ -113,6 +123,8 @@ export default function AdminChatsPage() {
             const groupedRooms = new Map<string, ChatRoom[]>();
 
             for (const room of roomsWithMessages) {
+                // Determine pair key safely
+                if (!room.participantIds) continue;
                 const pairKey = room.participantIds.sort().join('-');
                 if (!groupedRooms.has(pairKey)) {
                     groupedRooms.set(pairKey, []);
@@ -121,9 +133,21 @@ export default function AdminChatsPage() {
             }
 
             const unifiedRooms: ChatRoom[] = [];
+
+            const getMillis = (t: any) => {
+                if (!t) return 0;
+                if (typeof t === 'number') return t;
+                if (t instanceof Date) return t.getTime();
+                if (typeof t?.toMillis === 'function') return t.toMillis();
+                if (t?.seconds) return t.seconds * 1000;
+                return new Date(t).getTime();
+            };
+
             for (const [pairKey, roomsInGroup] of groupedRooms.entries()) {
                 const latestRoom = roomsInGroup.reduce((latest, current) => {
-                    if (!latest.lastMessage?.timestamp || (current.lastMessage?.timestamp && current.lastMessage.timestamp > latest.lastMessage.timestamp)) {
+                    const latestTime = getMillis(latest.lastMessage?.timestamp);
+                    const currentTime = getMillis(current.lastMessage?.timestamp);
+                    if (currentTime > latestTime) {
                         return current;
                     }
                     return latest;
@@ -137,11 +161,12 @@ export default function AdminChatsPage() {
                     lastMessage: latestRoom.lastMessage,
                     isProjectChat: false,
                     isUnified: true,
+                    // @ts-ignore
                     sourceRoomIds: roomsInGroup.map(r => r.id),
                 });
             }
 
-            unifiedRooms.sort((a, b) => (b.lastMessage?.timestamp?.toMillis() || 0) - (a.lastMessage?.timestamp?.toMillis() || 0));
+            unifiedRooms.sort((a, b) => getMillis(b.lastMessage?.timestamp) - getMillis(a.lastMessage?.timestamp));
             setUnifiedChatRooms(unifiedRooms);
             setIsLoading(false);
 
@@ -151,7 +176,7 @@ export default function AdminChatsPage() {
         });
 
         return () => unsubscribe();
-    }, [firestore]);
+    }, [database]);
 
 
     const filteredChatRooms = React.useMemo(() => {

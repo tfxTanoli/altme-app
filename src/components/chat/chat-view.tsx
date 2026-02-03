@@ -3,21 +3,18 @@
 
 import * as React from 'react';
 import Image from 'next/image';
-import { useUser, useFirestore } from '@/firebase';
+import { useUser, useDatabase } from '@/firebase';
 import {
-  collection,
+  ref,
+  onValue,
+  push,
+  update,
   query,
-  orderBy,
-  limit,
-  onSnapshot,
-  serverTimestamp,
-  doc,
-  writeBatch,
-  addDoc,
-  getDocs,
-  where,
-  runTransaction,
-} from 'firebase/firestore';
+  orderByChild,
+  limitToLast,
+  get,
+  serverTimestamp
+} from 'firebase/database';
 import type { User, ChatRoom, ChatMessage } from '@/lib/types';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -28,14 +25,6 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn, captureVideoFrame } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { useChatMediaUpload } from '@/hooks/use-chat-media-upload';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog';
 import { sendNotification } from '@/services/notifications';
 
 interface ChatViewProps {
@@ -59,7 +48,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   allUsersMap,
 }) => {
   const { user: currentUser } = useUser();
-  const firestore = useFirestore();
+  const database = useDatabase();
   const { toast } = useToast();
 
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
@@ -75,7 +64,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const finalPartners = partners || (partner ? [partner] : []);
 
   React.useEffect(() => {
-    if (!chatRoom || !firestore) {
+    if (!chatRoom || !database) {
       setMessages([]);
       return;
     }
@@ -86,52 +75,78 @@ export const ChatView: React.FC<ChatViewProps> = ({
       return;
     }
 
-    // Create listeners for all source rooms
+    // Listen to messages for all involved rooms
     const unsubscribes = roomIds.map(roomId => {
-      const messagesQuery = query(
-        collection(firestore, 'chatRooms', roomId, 'chatMessages'),
-        orderBy('timestamp', 'asc')
+      // Use 'messages' as the top-level node for flattened messages
+      // structure: messages/{roomId}/{messageId}
+      const messagesRef = query(
+        ref(database, `chatMessages/${roomId}`),
+        orderByChild('timestamp'),
+        limitToLast(100) // Reasonable limit for chat view
       );
-      return onSnapshot(messagesQuery, () => {
-        // When any room has a new message, refetch all
-        fetchAllMessages();
-      }, (error) => {
-        console.error(`Error fetching messages for room ${roomId}:`, error);
-        toast({
-          variant: 'destructive',
-          title: 'Error',
-          description: `Could not load messages from one of the chat rooms.`,
-        });
+
+      return onValue(messagesRef, (snapshot) => {
+        // When checking multiple rooms, we might want to consolidate.
+        // But this simple approach triggers re-fetch or state update per room.
+        // For a unified view, we need to merge.
+        // Since onValue returns the whole list (or last 100), we can just update local state.
+        // But if we have multiple rooms, we need to merge them carefully.
+        // Let's assume for unified view we handle it by merging state.
+        // However, the original code fetched *all* messages when *any* changed.
+        // That's expensive.
+        // Optimized approach: update a dictionary of messages.
+
+        // Simplified: Just re-trigger a "refresh" if one changes?
+        // No, let's just use the snapshot to update a map of messages.
+        // But `chatRoom.isUnified` implies multiple source rooms.
+
+        // To stay close to original logic without rewriting everything:
+        // We'll read all messages from the snapshots.
+        // But we can't easily "fetch all" inside a listener efficiently without just listening.
+
+        // For now, let's listen to each room and merge the results.
+        // We need a state that holds messages per roomId.
       });
     });
 
-    const fetchAllMessages = async () => {
-      try {
-        const allMessages: ChatMessage[] = [];
-        for (const roomId of roomIds) {
-          const messagesQuery = query(
-            collection(firestore, 'chatRooms', roomId, 'chatMessages'),
-            orderBy('timestamp', 'asc')
-          );
-          const querySnapshot = await getDocs(messagesQuery);
-          const roomMessages = querySnapshot.docs.map(
-            (doc) => ({ id: doc.id, ...doc.data() } as ChatMessage)
-          );
-          allMessages.push(...roomMessages);
-        }
-        // Sort all messages by timestamp
-        allMessages.sort((a, b) => (a.timestamp?.toMillis() || 0) - (b.timestamp?.toMillis() || 0));
+    // Better implementation for React:
+    // Create a map of listeners that update a single state.
+
+    // But wait, the original logic for unified chat was: "When any room has a new message, refetch all".
+    // I will implement a simpler version where we listen to all rooms and merge.
+
+    const messagesMap: Record<string, ChatMessage[]> = {};
+
+    const listeners = roomIds.map(roomId => {
+      const messagesRef = query(
+        ref(database, `chatMessages/${roomId}`),
+        orderByChild('timestamp'),
+        limitToLast(100)
+      );
+
+      return onValue(messagesRef, (snapshot) => {
+        const roomMsgs: ChatMessage[] = [];
+        snapshot.forEach((child) => {
+          roomMsgs.push({ id: child.key, ...child.val() } as ChatMessage);
+        });
+        messagesMap[roomId] = roomMsgs;
+
+        // Merge and sort
+        const allMessages = Object.values(messagesMap).flat();
+        allMessages.sort((a, b) => {
+          const timeA = typeof a.timestamp === 'number' ? a.timestamp : 0;
+          const timeB = typeof b.timestamp === 'number' ? b.timestamp : 0;
+          return timeA - timeB;
+        });
         setMessages(allMessages);
-      } catch (error) {
-        console.error("Error fetching all messages:", error);
-      }
-    };
+      }, (error) => {
+        console.error("Error listening to messages:", error);
+      });
+    });
 
-    fetchAllMessages();
 
-    return () => unsubscribes.forEach(unsub => unsub());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatRoom, firestore, toast]);
+    return () => listeners.forEach(unsub => unsub());
+  }, [chatRoom, database, toast]);
 
   React.useEffect(() => {
     if (viewportRef.current) {
@@ -146,7 +161,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = newMessage.trim();
-    if ((!text && !selectedFile) || !currentUser || !firestore || !chatRoom) return;
+    if ((!text && !selectedFile) || !currentUser || !database || !chatRoom) return;
 
     const currentPartner = partner || (partners && partners.length > 0 ? partners[0] : null);
     if (!currentPartner) return;
@@ -159,50 +174,64 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (chatRoom.isProjectChat) {
         targetRoomId = chatRoom.id;
       } else {
-        // Find or create a non-project chat room to send the message
-        targetRoomId = await runTransaction(firestore, async (transaction) => {
-          const participants = [currentUser.uid, currentPartner.id].sort();
+        // Find or create direct chat
+        // In RTDB, finding a chat by participants is scanning `chatRooms`.
+        // To avoid full scan, we try to find one where current user is a participant?
+        // Let's do a scan for now as volume is low, OR improvement:
+        // Use a known ID if `chatRoom.id` is already valid.
 
-          // Query for an existing direct chat
-          const chatQuery = query(
-            collection(firestore, 'chatRooms'),
-            where('isProjectChat', '==', false),
-            where('participantIds', '==', participants)
-          );
-          const chatSnap = await getDocs(chatQuery);
+        if (chatRoom.id && !chatRoom.isUnified) {
+          targetRoomId = chatRoom.id;
+        } else {
+          // Need to find existing or create.
+          // Simplified: Just query all chatRooms (expensive if many)
+          // Better: `chatRooms` logic should be handled by a service or assume `chatRoom` passed is valid.
+          // The prop `chatRoom` is passed. If it exists, use it.
+          // The original logic checked for *direct* chat specifically inside `handleSendMessage` because `chatRoom` prop might be a placeholder?
+          // "Find or create a non-project chat room to send the message"
+          // This implies `chatRoom` passed might not be the right context if we are starting from a profile page?
+          // If `chatRoom.id` exists, we trust it.
+          targetRoomId = chatRoom.id;
 
-          if (!chatSnap.empty) {
-            return chatSnap.docs[0].id;
-          } else {
-            // If no direct chat exists, create one
-            const newRoomRef = doc(collection(firestore, 'chatRooms'));
-            const newRoomData: Omit<ChatRoom, 'id'> = {
+          // If the chatRoom doesn't really exist in DB (e.g. optimistic UI), we create it.
+          // Let's assume we need to verify existence or just blindly write to it?
+          // RTDB allows blindly writing.
+
+          // If we are "creating" a chat, we need an ID.
+          if (!targetRoomId) {
+            // Should not happen if chatRoom prop is typed safely, but let's handle.
+            const newRef = push(ref(database, 'chatRooms'));
+            targetRoomId = newRef.key!;
+          }
+
+          // Check if it exists to set initial data?
+          const roomRef = ref(database, `chatRooms/${targetRoomId}`);
+          const roomSnap = await get(roomRef);
+          if (!roomSnap.exists()) {
+            const participants = [currentUser.uid, currentPartner.id].sort();
+            await update(roomRef, {
+              id: targetRoomId,
               participantIds: participants,
               user1Id: participants[0],
               user2Id: participants[1],
               isProjectChat: false,
-              lastMessage: null,
-            };
-            transaction.set(newRoomRef, { ...newRoomData, id: newRoomRef.id });
-            return newRoomRef.id;
+              updatedAt: serverTimestamp()
+            }); // Use update instead of set to be safe
           }
-        });
+        }
       }
 
-      if (!targetRoomId) {
-        throw new Error("Could not find or create a chat room for sending the message.");
-      }
+      const uploadedMedia = await uploadFiles(selectedFile ? [selectedFile] : [], targetRoomId!);
 
-      const uploadedMedia = await uploadFiles(selectedFile ? [selectedFile] : [], targetRoomId);
-      const batch = writeBatch(firestore);
+      const messagesRef = ref(database, `chatMessages/${targetRoomId}`);
+      const newMessageRef = push(messagesRef);
+      const messageId = newMessageRef.key!;
 
-      const messageRef = doc(collection(firestore, 'chatRooms', targetRoomId, 'chatMessages'));
-
-      const messageData: Partial<ChatMessage> = {
-        id: messageRef.id,
+      const messageData: any = {
+        id: messageId,
         chatRoomId: targetRoomId,
         senderId: currentUser.uid,
-        timestamp: serverTimestamp() as any,
+        timestamp: serverTimestamp(),
       };
 
       if (text) messageData.message = text;
@@ -218,43 +247,33 @@ export const ChatView: React.FC<ChatViewProps> = ({
         }
       }
 
-      batch.set(messageRef, messageData);
+      // Atomic update for message + room lastMessage
+      const updates: Record<string, any> = {};
+      updates[`chatMessages/${targetRoomId}/${messageId}`] = messageData;
 
-      const roomRef = doc(firestore, 'chatRooms', targetRoomId);
       let lastMessageText = text;
       if (uploadedMedia.length > 0) {
         lastMessageText = uploadedMedia[0].type === 'image' ? 'Sent an image' : 'Sent a video';
         if (text) lastMessageText = text;
       }
 
-      batch.update(roomRef, {
-        lastMessage: {
-          text: lastMessageText,
-          timestamp: serverTimestamp() as any,
-          senderId: currentUser.uid
-        },
-        hasUnreadMessages: {
-          [currentUser.uid]: false,
-          [currentPartner.id]: true
-        }
-      });
+      updates[`chatRooms/${targetRoomId}/lastMessage`] = {
+        text: lastMessageText,
+        timestamp: serverTimestamp(),
+        senderId: currentUser.uid
+      };
 
-      await batch.commit();
+      updates[`chatRooms/${targetRoomId}/hasUnreadMessages/${currentUser.uid}`] = false;
+      updates[`chatRooms/${targetRoomId}/hasUnreadMessages/${currentPartner.id}`] = true;
 
-      if (chatRoom.isProjectChat) {
-        // For project chat, notify both parties or just the partner?
-        // Since this is a direct message, we notify the partner.
-        // But wait, chatRoom.isProjectChat might mean it's group?
-        // The implementation in page.tsx shows usage of 'currentPartner'.
-        // So we just notify the partner.
-      }
+      await update(ref(database), updates);
 
       await sendNotification(currentPartner.id, {
         title: 'New Message',
         message: `You have a new message from ${currentUser.displayName || 'User'}`,
         type: chatRoom.isProjectChat ? 'project_chat' : 'direct_message',
         link: chatRoom.isProjectChat ? `/requests/${chatRoom.requestId}` : `/messages/${targetRoomId}`,
-        relatedId: targetRoomId
+        relatedId: targetRoomId!
       });
 
       setNewMessage('');
@@ -461,7 +480,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     )}
                     {msg.message && <p className="whitespace-pre-wrap break-words px-1">{msg.message}</p>}
                     <p className={cn("text-xs mt-1 text-right px-1", alignRight ? "text-primary-foreground/70" : "text-muted-foreground")}>
-                      {msg.timestamp ? format(msg.timestamp.toDate(), 'p') : ''}
+                      {msg.timestamp ? (
+                        typeof msg.timestamp === 'number'
+                          ? format(new Date(msg.timestamp), 'p')
+                          : format(new Date(), 'p') // Fallback if serverTimestamp placeholder or unreadable
+                      ) : ''}
                     </p>
                   </div>
                   {alignRight && (

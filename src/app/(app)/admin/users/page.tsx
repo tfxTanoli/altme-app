@@ -19,11 +19,10 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { getImageUrl } from '@/lib/utils';
-import { useFirestore, errorEmitter, FirestorePermissionError, useDatabase } from '@/firebase';
-import { collection, deleteDoc, doc, getDocs, query, where, writeBatch, updateDoc } from 'firebase/firestore';
+import { useDatabase } from '@/firebase';
 import { ref, get, update, remove } from 'firebase/database';
 import type { User } from '@/lib/types';
-import { Loader, MoreHorizontal, Pencil, Trash2, Ban, CheckCircle } from 'lucide-react';
+import { Loader, MoreHorizontal, Pencil, Trash2, Ban, CheckCircle, RefreshCcw } from 'lucide-react';
 import { format } from 'date-fns';
 import {
   DropdownMenu,
@@ -64,13 +63,12 @@ import { useToast } from '@/hooks/use-toast';
 import { deleteUserFromAuth } from './actions';
 
 export default function AdminUsersPage() {
-  const firestore = useFirestore();
   const database = useDatabase();
   const { toast } = useToast();
   const [userToDelete, setUserToDelete] = React.useState<User | null>(null); // For Disable/Enable
   const [userToHardDelete, setUserToHardDelete] = React.useState<User | null>(null); // For Permanent Delete
   const [userToEdit, setUserToEdit] = React.useState<User | null>(null);
-  const [editForm, setEditForm] = React.useState({ name: '', email: '', role: 'user' as 'user' | 'admin' });
+  const [editForm, setEditForm] = React.useState({ name: '', email: '', role: 'user' as 'user' | 'admin' | 'photographer' });
   const [allUsers, setAllUsers] = React.useState<User[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
 
@@ -92,9 +90,8 @@ export default function AdminUsersPage() {
 
           // Sort users by join date client-side
           usersData.sort((a, b) => {
-            // Handle both Timestamp objects (from Firestore migration) or primitive numbers/strings from RTDB
-            const timeA = a.joinDate ? (typeof a.joinDate === 'object' && 'seconds' in a.joinDate ? a.joinDate.seconds * 1000 : new Date(a.joinDate).getTime()) : 0;
-            const timeB = b.joinDate ? (typeof b.joinDate === 'object' && 'seconds' in b.joinDate ? b.joinDate.seconds * 1000 : new Date(b.joinDate).getTime()) : 0;
+            const timeA = a.joinDate || 0;
+            const timeB = b.joinDate || 0;
             return timeB - timeA;
           });
           setAllUsers(usersData);
@@ -115,10 +112,9 @@ export default function AdminUsersPage() {
   const activeUsers = allUsers;
 
   const getJoinDate = (user: any) => {
-    if (user.joinDate && user.joinDate.seconds) {
-      return format(new Date(user.joinDate.seconds * 1000), 'PPP');
+    if (user.joinDate) {
+      return format(new Date(user.joinDate), 'PPP');
     }
-    // For users created before joinDate was added
     return 'N/A';
   };
 
@@ -146,15 +142,9 @@ export default function AdminUsersPage() {
       // 1. Update RTDB
       await update(userRef, updates).catch(e => {
         console.error("RTDB Update failed:", e);
-        throw e; // Re-throw to trigger catch block if critical
+        throw e;
       });
 
-      // 2. Update Firestore (for Security Rules)
-      if (firestore) {
-        const firestoreUserRef = doc(firestore, 'users', userToEdit.id);
-        // We use non-blocking or simple update. Using standard updateDoc here for consistency.
-        await updateDoc(firestoreUserRef, updates).catch(err => console.error("Firestore sync error:", err));
-      }
 
       setAllUsers(prev => prev.map(u => u.id === userToEdit.id ? { ...u, ...editForm } : u));
       toast({ title: 'User Updated', description: 'User details have been successfully updated.' });
@@ -175,19 +165,8 @@ export default function AdminUsersPage() {
 
     try {
       // 1. Update RTDB
-      const rtdbPromise = update(userRef, updateData);
+      await update(userRef, updateData);
 
-      // 2. Update Firestore
-      let firestorePromise = Promise.resolve();
-      if (firestore) {
-        const firestoreUserRef = doc(firestore, 'users', userToDelete.id);
-        firestorePromise = updateDoc(firestoreUserRef, updateData).then(() => void 0).catch(err => {
-          console.error("Firestore status sync error:", err);
-          // Return undefined to avoid breaking Promise.all
-        });
-      }
-
-      await Promise.all([rtdbPromise, firestorePromise]);
 
       setAllUsers(prev => prev.map(u => u.id === userToDelete.id ? { ...u, status: newStatus as 'active' | 'deleted' } : u));
 
@@ -224,14 +203,6 @@ export default function AdminUsersPage() {
 
       await Promise.all(rtdbPromises);
 
-      // 2. Remove from Firestore
-      let firestorePromise = Promise.resolve();
-      if (firestore) {
-        const firestoreUserRef = doc(firestore, 'users', userToHardDelete.id);
-        firestorePromise = deleteDoc(firestoreUserRef).then(() => void 0).catch(err => {
-          console.error("Firestore delete error:", err);
-        });
-      }
 
 
 
@@ -254,6 +225,53 @@ export default function AdminUsersPage() {
       toast({ title: 'Error', description: `Failed to delete user: ${error instanceof Error ? error.message : 'Unknown error'}`, variant: 'destructive' });
     } finally {
       setUserToHardDelete(null);
+    }
+  };
+
+  const handleSyncProfiles = async () => {
+    if (!database) return;
+    setIsLoading(true);
+    try {
+      const usersRef = ref(database, 'users');
+      const profilesRef = ref(database, 'photographerProfiles');
+
+      const [usersSnap, profilesSnap] = await Promise.all([get(usersRef), get(profilesRef)]);
+
+      if (!usersSnap.exists() || !profilesSnap.exists()) {
+        toast({ title: 'Nothing to sync', description: 'No users or profiles found.' });
+        return;
+      }
+
+      const users = usersSnap.val();
+      const profiles = profilesSnap.val();
+      const updates: any = {};
+      let count = 0;
+
+      Object.keys(profiles).forEach(profileId => {
+        const profile = profiles[profileId];
+        const user = users[profile.userId];
+        if (user) {
+          // Always update to ensure consistency, keying by profile path
+          if (profile.name !== user.name || profile.photoURL !== (user.photoURL || null)) {
+            updates[`photographerProfiles/${profileId}/name`] = user.name || null;
+            updates[`photographerProfiles/${profileId}/photoURL`] = user.photoURL || null;
+            count++;
+          }
+        }
+      });
+
+      if (count > 0) {
+        await update(ref(database), updates);
+        toast({ title: 'Sync Complete', description: `Updated ${count} profiles with user data.` });
+      } else {
+        toast({ title: 'Sync Complete', description: 'All profiles are already up to date.' });
+      }
+
+    } catch (error) {
+      console.error("Sync error:", error);
+      toast({ variant: 'destructive', title: 'Sync Failed', description: 'Could not sync profiles.' });
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -338,6 +356,12 @@ export default function AdminUsersPage() {
       <main className="flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-8">
         <div className="flex items-center">
           <h1 className="font-semibold text-lg md:text-2xl">Manage Users</h1>
+          <Button variant="outline" size="sm" className="ml-auto gap-1" onClick={handleSyncProfiles}>
+            <RefreshCcw className="h-3.5 w-3.5" />
+            <span className="sr-only sm:not-sr-only sm:whitespace-nowrap">
+              Sync Profiles
+            </span>
+          </Button>
         </div>
 
         <Card>
@@ -376,7 +400,7 @@ export default function AdminUsersPage() {
                               alt={user.name}
                               data-ai-hint="person avatar"
                             />
-                            <AvatarFallback>{user.name.charAt(0)}</AvatarFallback>
+                            <AvatarFallback>{user.name?.charAt(0) || 'U'}</AvatarFallback>
                           </Avatar>
                           <div>
                             <div className="font-medium">{user.name}</div>

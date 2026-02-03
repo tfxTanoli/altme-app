@@ -3,9 +3,8 @@
 'use client';
 
 import * as React from 'react';
-import { useFirestore, useUser, errorEmitter, FirestorePermissionError, initializeFirebase } from '@/firebase';
-import { collection, query, where, orderBy, onSnapshot, doc, getDoc, getDocs, writeBatch } from 'firebase/firestore';
-import { getDatabase, ref, get } from 'firebase/database';
+import { useUser, useDatabase } from '@/firebase';
+import { ref, get, query, orderByChild, onValue, update } from 'firebase/database';
 import type { ChatRoom, User } from '@/lib/types';
 import { Loader, MessageSquare } from 'lucide-react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
@@ -13,7 +12,7 @@ import { ChatView } from '@/components/chat/chat-view';
 import { ChatList } from '@/components/chat/chat-list';
 
 export default function MessagesPage({ params, searchParams }: { params: Promise<{ id: string }>, searchParams: Promise<{ partnerId?: string }> }) {
-    const firestore = useFirestore();
+    const database = useDatabase();
     const { user: currentUser } = useUser();
     const router = useRouter();
 
@@ -34,70 +33,111 @@ export default function MessagesPage({ params, searchParams }: { params: Promise
 
     // Fetch all chat rooms and users for the list
     React.useEffect(() => {
-        if (!currentUser || !firestore) {
+        if (!currentUser || !database) {
             if (!currentUser) setIsLoading(false);
             return;
         };
 
-        const chatRoomsQuery = query(
-            collection(firestore, 'chatRooms'),
-            where('participantIds', 'array-contains', currentUser.uid),
-            where('isProjectChat', '==', false)
-        );
+        // RTDB doesn't query array-contains easily.
+        // We'll trust checking 'chatRooms' and filtering client-side or check 'users/{uid}/chats' index if available.
+        // Since we didn't migrate old data to have 'users/{uid}/chats' index for ALL chats, querying all 'chatRooms' might be heavy eventually.
+        // But for migration scope:
+        // Optimization: Create index "chatRooms" ordered by "updatedAt" or "lastMessage/timestamp" and filtered relevant ones client side?
+        // Or assume 'users/{uid}/chats' exists?
+        // In AdminProjects/AdminChats we updated 'users/uid/chats/chatId = true'.
+        // If we want to rely on that index:
+        // const userChatsRef = ref(database, `users/${currentUser.uid}/chats`);
+        // We will TRY to use 'users/{uid}/chats' index. If empty, maybe fallback or user just has no chats.
+        // But let's check 'chatRooms' directly for now as a safer migration fallback if we didn't backfill "chats" index for everyone.
+        // Actually, 'chatRooms' might be large.
+        // Let's stick to querying 'chatRooms' but we can't filter by array-contains.
+        // We can query by `user1Id` equalTo currentUser.uid OR `user2Id` equalTo currentUser.uid if structured that way.
+        // But participants can be [uid1, uid2].
+        // For MVP, fetch all chatRooms and filter. If huge, we need Index.
+        // Let's assume we migrated 'users/{uid}/chats' index or iterate all 'chatRooms' for now (simplest for 100% correct data if small db).
+        // Let's query `chatRooms` ordered by `lastMessage/timestamp`.
 
-        const unsubscribe = onSnapshot(chatRoomsQuery, async (snapshot) => {
-            const allRooms = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatRoom));
-            const rooms = allRooms; // Show all, even empty
-            rooms.sort((a, b) => (b.lastMessage?.timestamp?.toMillis() || 0) - (a.lastMessage?.timestamp?.toMillis() || 0));
-            setChatRooms(rooms);
+        // Fetch user's chats from 'users/{uid}/chats' index
+        const userChatsRef = ref(database, `users/${currentUser.uid}/chats`);
 
-            if (rooms.length > 0) {
-                const partnerIds = new Set(rooms.map(room => room.participantIds.find(id => id !== currentUser.uid)).filter(Boolean) as string[]);
+        const unsubscribe = onValue(userChatsRef, async (userChatsSnapshot) => {
+            if (userChatsSnapshot.exists()) {
+                const chatIds = Object.keys(userChatsSnapshot.val());
 
-                const newUsersMap = new Map(usersMap);
-                const idsToFetch = Array.from(partnerIds).filter(id => !newUsersMap.has(id));
+                // Fetch actual room data for each ID
+                // We can listen to them, or just fetch once? 
+                // Requirement implies real-time list.
+                // Ideally we listen to EACH, but that's many listeners.
+                // OR we listen to 'chatRooms' but filter? No, can't read root.
+                // We MUST listen to each room or fetch once.
+                // For now, let's fetch once to render the list, and maybe set up listener for updates?
+                // Simpler MVP: Fetch once. If real-time needed for "new messages" badge, we need listener.
+                // Let's Promise.all fetch them for the list.
 
-                if (idsToFetch.length > 0) {
-                    const { database } = initializeFirebase();
-                    await Promise.all(idsToFetch.map(async (uid) => {
-                        const userRef = ref(database, `users/${uid}`);
-                        try {
-                            const snapshot = await get(userRef);
-                            if (snapshot.exists()) {
-                                newUsersMap.set(uid, { id: uid, ...snapshot.val() } as User);
-                            } else {
-                                console.warn(`User ${uid} not found in RTDB`);
-                            }
-                        } catch (err) {
-                            console.error(`Failed to fetch user ${uid} from RTDB`, err);
+                const roomsData = await Promise.all(chatIds.map(async (id) => {
+                    try {
+                        const roomSnap = await get(ref(database, `chatRooms/${id}`));
+                        if (roomSnap.exists()) {
+                            return { id, ...roomSnap.val() } as ChatRoom;
                         }
-                    }));
-                    setUsersMap(newUsersMap);
+                    } catch (err) {
+                        console.warn(`Failed to fetch room ${id}`, err);
+                    }
+                    return null;
+                }));
+
+                const validRooms = roomsData.filter((r): r is ChatRoom => r !== null && !r.isProjectChat);
+
+                // Sort by last message
+                validRooms.sort((a, b) => {
+                    const getMillis = (t: any) => {
+                        if (typeof t === 'number') return t;
+                        if (t?.seconds) return t.seconds * 1000;
+                        return 0;
+                    };
+                    return getMillis(b.lastMessage?.timestamp) - getMillis(a.lastMessage?.timestamp);
+                });
+
+                setChatRooms(validRooms);
+
+                // Fetch users for these rooms
+                if (validRooms.length > 0) {
+                    const partnerIds = new Set(validRooms.map(room => room.participantIds.find(id => id !== currentUser.uid)).filter(Boolean) as string[]);
+                    const newUsersMap = new Map(usersMap);
+                    const idsToFetch = Array.from(partnerIds).filter(id => !newUsersMap.has(id));
+
+                    if (idsToFetch.length > 0) {
+                        await Promise.all(idsToFetch.map(async (uid) => {
+                            try {
+                                const snap = await get(ref(database, `users/${uid}`));
+                                if (snap.exists()) {
+                                    newUsersMap.set(uid, { id: uid, ...snap.val() } as User);
+                                }
+                            } catch (e) { console.error(e) }
+                        }));
+                        setUsersMap(newUsersMap);
+                    }
                 }
+
+            } else {
+                setChatRooms([]);
             }
             setIsLoading(false);
         }, (error) => {
-            console.error("Error listening to chat rooms:", error);
-            if (!error.message.includes('requires an index')) {
-                errorEmitter.emit('permission-error', new FirestorePermissionError({
-                    path: 'chatRooms',
-                    operation: 'list',
-                }));
-            }
+            console.error("Error listening to user chats:", error);
             setIsLoading(false);
         });
 
         return () => unsubscribe();
-    }, [currentUser, firestore]);
+    }, [currentUser, database]);
 
     // Handle fetching the specific active chat room and its participants
     React.useEffect(() => {
-        if (!currentUser || !firestore) return;
+        if (!currentUser || !database) return;
 
         if (activeChatRoomId === 'new') {
             if (newPartnerId && !tempPartner) {
                 const fetchPartner = async () => {
-                    const { database } = initializeFirebase();
                     const userRef = ref(database, `users/${newPartnerId}`);
                     try {
                         const snapshot = await get(userRef);
@@ -117,10 +157,10 @@ export default function MessagesPage({ params, searchParams }: { params: Promise
             return;
         }
 
-        const roomRef = doc(firestore, 'chatRooms', activeChatRoomId);
-        const unsubscribe = onSnapshot(roomRef, async (docSnap) => {
-            if (docSnap.exists()) {
-                const room = { id: docSnap.id, ...docSnap.data() } as ChatRoom;
+        const roomRef = ref(database, `chatRooms/${activeChatRoomId}`);
+        const unsubscribe = onValue(roomRef, async (snapshot) => {
+            if (snapshot.exists()) {
+                const room = { id: snapshot.key, ...snapshot.val() } as ChatRoom;
                 if (room.isProjectChat) {
                     router.push(`/requests/${room.requestId}`);
                     return;
@@ -129,46 +169,37 @@ export default function MessagesPage({ params, searchParams }: { params: Promise
                 setActiveChatRoom(room);
 
                 const partnerId = room.participantIds.find(id => id !== currentUser.uid);
-                if (partnerId) {
-                    if (!usersMap.has(partnerId)) {
-                        const { database } = initializeFirebase();
-                        const userRef = ref(database, `users/${partnerId}`);
-                        try {
-                            const snapshot = await get(userRef);
-                            if (snapshot.exists()) {
-                                const userData = { id: partnerId, ...snapshot.val() } as User;
-                                setUsersMap(prev => {
-                                    const newMap = new Map(prev);
-                                    newMap.set(partnerId, userData);
-                                    return newMap;
-                                });
-                            }
-                        } catch (err) {
-                            console.error("Error fetching partner", err);
+                if (partnerId && !usersMap.has(partnerId)) {
+                    const userRef = ref(database, `users/${partnerId}`);
+                    try {
+                        const snap = await get(userRef);
+                        if (snap.exists()) {
+                            const userData = { id: partnerId, ...snap.val() } as User;
+                            setUsersMap(prev => {
+                                const newMap = new Map(prev);
+                                newMap.set(partnerId, userData);
+                                return newMap;
+                            });
                         }
-                    }
+                    } catch (err) { console.error(err) }
                 }
 
                 // Mark messages as read
                 if (room.hasUnreadMessages && room.hasUnreadMessages[currentUser.uid]) {
-                    const batch = writeBatch(firestore);
-                    batch.update(roomRef, { [`hasUnreadMessages.${currentUser.uid}`]: false });
-                    await batch.commit();
+                    const updates: any = {};
+                    updates[`chatRooms/${activeChatRoomId}/hasUnreadMessages/${currentUser.uid}`] = false;
+                    await update(ref(database), updates);
                 }
 
             } else {
-                router.push('/messages'); // Room doesn't exist or user doesn't have access
+                router.push('/messages');
             }
         }, (error) => {
             console.error("Error fetching active chat room:", error);
-            errorEmitter.emit('permission-error', new FirestorePermissionError({
-                path: `chatRooms/${activeChatRoomId}`,
-                operation: 'get',
-            }));
         });
 
         return () => unsubscribe();
-    }, [activeChatRoomId, currentUser, firestore, router, newPartnerId, usersMap]); // dependencies adjusted
+    }, [activeChatRoomId, currentUser, database, router, newPartnerId]);
 
 
     const partner = React.useMemo(() => {
