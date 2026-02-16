@@ -896,7 +896,7 @@ export default function PhotographerDetailPage({ params }: { params: Promise<{ i
           </section>
 
           {/* Portfolio */}
-          {isPhotographer && (
+          {(isPhotographer || photographerProfile) && (
             <section>
               <h2 className="text-xl font-bold mb-4">Portfolio</h2>
               {portfolioItems.length > 0 ? (
@@ -904,16 +904,19 @@ export default function PhotographerDetailPage({ params }: { params: Promise<{ i
                   items={portfolioItems}
                   setItems={setPortfolioItems}
                   profileId={photographerProfile?.id || ''}
-                  isOwnProfile={false} // Or check if current user matches
+                  isOwnProfile={false}
                   onUploadClick={() => { }}
                   isLoading={false}
                 />
               ) : (
-                <Card>
-                  <CardContent className="py-12 text-center text-muted-foreground">
-                    This photographer hasn't uploaded any portfolio items yet.
-                  </CardContent>
-                </Card>
+                <PortfolioGallery
+                  items={[]}
+                  setItems={setPortfolioItems}
+                  profileId={photographerProfile?.id || ''}
+                  isOwnProfile={false}
+                  onUploadClick={() => { }}
+                  isLoading={false}
+                />
               )}
             </section>
           )}
